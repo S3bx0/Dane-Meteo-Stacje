@@ -26,6 +26,18 @@ python -m pip install -e .
 
 ## Użycie
 
+### GUI (Bootstrap)
+
+```bash
+python -m dane_meteo_stacje.gui_bootstrap
+```
+
+Lub po instalacji skryptu:
+
+```bash
+dane-meteo-stacje-gui
+```
+
 ### Wyszukiwanie stacji
 
 ```bash
