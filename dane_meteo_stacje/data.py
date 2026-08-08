@@ -4,15 +4,17 @@ import csv
 import hashlib
 import json
 import os
-import random
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from random import SystemRandom
 from typing import Any, TypedDict, cast
 
 import requests
 from typing_extensions import NotRequired
+
+_RANDOM = SystemRandom()
 
 
 class NoaaClientError(Exception):
@@ -185,7 +187,7 @@ class NoaaClient:
 
     def _sleep_with_backoff(self, attempt: int) -> None:
         base = self.backoff_seconds * (2**attempt)
-        jitter = random.uniform(0, self.jitter_seconds) if self.jitter_seconds > 0 else 0.0
+        jitter = _RANDOM.uniform(0, self.jitter_seconds) if self.jitter_seconds > 0 else 0.0
         time.sleep(base + jitter)
 
     def fetch_json(self, url: str, token: str | None = None) -> tuple[Any, int, dict[str, str]]:

@@ -148,6 +148,11 @@ W przyszłości dane z tego narzędzia mogą być używane jako warstwa wejścio
 python -m pytest -q
 ```
 
+CI blokuje zmiany, ktore nie przechodza Ruff, mypy, testow z coverage co najmniej 85%,
+skanu kodu Bandit albo audytu zaleznosci pip-audit. Osobny workflow `NOAA Smoke`
+codziennie sprawdza rzeczywiste API NOAA z sekretem `NOAA_API_TOKENS`; mozna go tez
+uruchomic recznie w GitHub Actions.
+
 ## Zrodla danych i noty
 
 - Projekt korzysta z danych stacji publikowanych przez NOAA/NCEI API.

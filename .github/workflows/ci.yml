@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -8,6 +11,7 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -28,6 +32,12 @@ jobs:
 
       - name: Mypy
         run: python -m mypy
+
+      - name: Bandit
+        run: python -m bandit -q -c pyproject.toml -r dane_meteo_stacje
+
+      - name: Dependency audit
+        run: python -m pip_audit .
 
       - name: Pytest with coverage
         env:
