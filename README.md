@@ -1,16 +1,20 @@
 # Dane Meteo Stacje
 
-Narzędzie do wyszukiwania i opisu przykładowych stacji meteorologicznych NOAA, z prostym interfejsem wiersza poleceń.
+Narzędzie do wyszukiwania i opisu stacji meteorologicznych NOAA z prostym interfejsem wiersza poleceń.
 
 ## Czym jest ten projekt?
 
 Projekt dostarcza lekką warstwę CLI do:
 
 - wyszukiwania stacji po nazwie miasta lub kraju,
+- filtrowania wyników po kraju lub ID stacji,
+- sortowania wyników według miasta, nazwy lub ID,
 - wyświetlania informacji o stacji,
+- eksportu danych do JSON lub CSV,
+- pracy z lokalnym cache i zewnętrznym źródłem danych,
 - łatwego integrowania z innymi narzędziami analitycznymi lub skryptami.
 
-Obecnie repo zawiera przykładowe dane dla kilku stacji i jest przygotowane pod dalszy rozwój.
+Obecnie repo zawiera przykładowe dane dla kilku stacji oraz obsługę danych zewnętrznych i cache.
 
 ## Instalacja
 
@@ -26,10 +30,28 @@ python -m pip install -e .
 python -m dane_meteo_stacje search Bialystok
 ```
 
+### Filtrowanie i sortowanie
+
+```bash
+python -m dane_meteo_stacje search Bialystok --country Poland
+python -m dane_meteo_stacje search Bialystok --station-id PLM00012295
+python -m dane_meteo_stacje search Bialystok --sort name
+python -m dane_meteo_stacje search Bialystok --limit 5
+```
+
 ### Informacje o stacji
 
 ```bash
 python -m dane_meteo_stacje info PLM00012295
+```
+
+### Eksport danych
+
+```bash
+python -m dane_meteo_stacje export --output-json stations.json
+python -m dane_meteo_stacje export --output-csv stations.csv --pretty
+python -m dane_meteo_stacje export --output-json subset.json --station-id PLM00012295
+python -m dane_meteo_stacje export --output-json noaa.json --noaa-like
 ```
 
 ### Po zainstalowaniu jako skrypt
