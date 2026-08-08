@@ -38,6 +38,10 @@ Lub po instalacji skryptu:
 dane-meteo-stacje-gui
 ```
 
+Ze wzgledow bezpieczenstwa pole `Remote URL` w GUI akceptuje wylacznie adresy HTTPS
+w domenie `noaa.gov`. Interfejs CLI nadal obsluguje zewnetrzne zrodla JSON podane przez
+`--remote-url`.
+
 ### Wyszukiwanie stacji
 
 ```bash

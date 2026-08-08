@@ -14,6 +14,17 @@ from urllib.parse import urlparse
 from .cli import _fetch_error_code, _render_fetch_error, search_stations
 from .data import NoaaClientError, StationRecord, fetch_stations_with_cache_details
 
+MAX_REQUEST_BODY_BYTES = 256 * 1024
+
+
+class InvalidRequestBody(ValueError):
+    pass
+
+
+class RequestBodyTooLarge(ValueError):
+    pass
+
+
 HTML_PAGE = """<!doctype html>
 <html lang="en">
   <head>
@@ -395,17 +406,22 @@ HTML_PAGE = """<!doctype html>
 
       function renderResults(rows) {
         const body = byId("result-body");
-        body.innerHTML = "";
+        body.replaceChildren();
         for (const row of rows) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `
-            <td>${row.city ?? ""}</td>
-            <td>${row.name ?? ""}</td>
-            <td class="mono">${row.station_id ?? ""}</td>
-            <td>${row.country ?? ""}</td>
-            <td>${row.latitude ?? ""}</td>
-            <td>${row.longitude ?? ""}</td>
-          `;
+          for (const [value, className] of [
+            [row.city, ""],
+            [row.name, ""],
+            [row.station_id, "mono"],
+            [row.country, ""],
+            [row.latitude, ""],
+            [row.longitude, ""],
+          ]) {
+            const cell = document.createElement("td");
+            cell.textContent = value ?? "";
+            if (className) cell.className = className;
+            tr.appendChild(cell);
+          }
           body.appendChild(tr);
         }
       }
@@ -515,6 +531,30 @@ def _parse_int(value: Any, *, default: int | None = None, minimum: int | None = 
     return parsed
 
 
+def _parse_content_length(raw_value: str | None) -> int:
+    try:
+        length = int(raw_value or "0")
+    except ValueError as exc:
+        raise InvalidRequestBody("Invalid Content-Length header") from exc
+    if length < 0:
+        raise InvalidRequestBody("Content-Length must be non-negative")
+    if length > MAX_REQUEST_BODY_BYTES:
+        raise RequestBodyTooLarge(f"Request body exceeds {MAX_REQUEST_BODY_BYTES} bytes")
+    return length
+
+
+def _validate_remote_url(value: str) -> str:
+    parsed = urlparse(value)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not hostname:
+        raise ValueError("Remote URL must be a valid HTTPS URL")
+    if hostname != "noaa.gov" and not hostname.endswith(".noaa.gov"):
+        raise ValueError("Remote URL host must belong to noaa.gov")
+    if parsed.username or parsed.password:
+        raise ValueError("Remote URL must not contain credentials")
+    return value
+
+
 def _csv_from_rows(rows: list[StationRecord]) -> str:
     output = io.StringIO()
     fieldnames = ["station_id", "city", "name", "country", "latitude", "longitude", "source", "notes"]
@@ -540,26 +580,36 @@ class AppHandler(BaseHTTPRequestHandler):
         self._send_json({"code": "NOT_FOUND", "message": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/search":
-            self._handle_search()
-            return
-        if parsed.path == "/api/export":
-            self._handle_export()
-            return
-        self._send_json({"code": "NOT_FOUND", "message": "Not found"}, status=HTTPStatus.NOT_FOUND)
+        try:
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/search":
+                self._handle_search()
+                return
+            if parsed.path == "/api/export":
+                self._handle_export()
+                return
+            self._send_json({"code": "NOT_FOUND", "message": "Not found"}, status=HTTPStatus.NOT_FOUND)
+        except RequestBodyTooLarge as exc:
+            self._send_json(
+                {"code": "PAYLOAD_TOO_LARGE", "message": str(exc)},
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        except InvalidRequestBody as exc:
+            self._send_json(
+                {"code": "BAD_REQUEST", "message": str(exc)},
+                status=HTTPStatus.BAD_REQUEST,
+            )
 
     def _read_json(self) -> dict[str, Any]:
-        raw_length = self.headers.get("Content-Length", "0")
-        length = int(raw_length)
+        length = _parse_content_length(self.headers.get("Content-Length"))
         body = self.rfile.read(length) if length > 0 else b"{}"
         try:
             parsed = json.loads(body.decode("utf-8"))
             if isinstance(parsed, dict):
                 return cast(dict[str, Any], parsed)
-            return {}
-        except json.JSONDecodeError:
-            return {}
+            raise InvalidRequestBody("JSON body must be an object")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise InvalidRequestBody("Request body must be valid UTF-8 JSON") from exc
 
     def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -594,7 +644,15 @@ class AppHandler(BaseHTTPRequestHandler):
             )
             return
 
-        remote_url = payload.get("remote_url")
+        remote_url_value = payload.get("remote_url")
+        try:
+            remote_url = _validate_remote_url(str(remote_url_value)) if remote_url_value else None
+        except ValueError as exc:
+            self._send_json(
+                {"code": "BAD_REQUEST", "message": str(exc)},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
         cache_path = payload.get("cache_path")
         country = payload.get("country")
         station_id = payload.get("station_id")
