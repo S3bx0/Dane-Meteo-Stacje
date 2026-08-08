@@ -45,6 +45,16 @@ dane-meteo-stacje info PLM00012295
 - `dane_meteo_stacje/data.py` — przykładowe dane stacji
 - `tests/` — testy regresyjne
 
+## Współpraca z Heatmapa
+
+Projekt jest projektowany jako pomocniczy moduł dla workflowu z Heatmapa. W praktyce:
+
+- pozwala znaleźć odpowiednie ID stacji NOAA dla danego miasta lub kraju,
+- dostarcza metadane stacji, które można wykorzystać przy przygotowaniu danych wejściowych,
+- ułatwia późniejsze generowanie lub mapowanie danych do formatu używanego przez Heatmapa.
+
+W przyszłości dane z tego narzędzia mogą być używane jako warstwa wejściowa do przygotowania plików JSON dla Heatmapa, np. przy definiowaniu źródła stacji dla konkretnego miasta.
+
 ## Testy
 
 ```bash
