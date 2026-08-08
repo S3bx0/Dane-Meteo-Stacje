@@ -1,0 +1,18 @@
+Dane Meteo Stacje - NOTICE
+
+1. Kod projektu
+- Kod zrodlowy tego projektu jest licencjonowany na warunkach MIT.
+- Szczegoly: plik LICENSE.
+
+2. Zrodlo danych NOAA/NCEI
+- Narzedzie pobiera dane stacji meteorologicznych z NOAA/NCEI API.
+- Referencja API: https://www.ncei.noaa.gov/cdo-web/webservices/v2
+- Ten projekt nie jest oficjalnym produktem NOAA i nie jest z NOAA powiazany.
+- Dane zewnetrzne sa dostarczane "as is" przez ich dostawce i moga sie zmieniac.
+
+3. Zaleznosci zewnetrzne
+- requests (Python HTTP library), licencja Apache-2.0.
+
+4. Uwaga praktyczna
+- Licencja kodu projektu (MIT) nie zmienia warunkow korzystania z API NOAA.
+- Uzytkownik odpowiada za zgodnosc ze stawkami limitow, politykami API i aktualnymi warunkami publikowanymi przez dostawce danych.

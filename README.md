@@ -82,12 +82,17 @@ python -m dane_meteo_stacje search Bialystok --remote-url https://example.com/st
 ### Tokeny NOAA
 
 ```bash
+# zalecane: CSV tokenow (kompatybilne z GitHub Secret NOAA_API_TOKENS)
+set NOAA_API_TOKENS=token_a,token_b,token_c
+
+# alternatywa: pula tokenow
+set NOAA_TOKENS=token_a,token_b,token_c
+
 # pojedynczy token
 set NOAA_TOKEN=twoj_token
-
-# pula tokenow (rotacja)
-set NOAA_TOKENS=token_a,token_b,token_c
 ```
+
+Priorytet odczytu tokenow: `NOAA_API_TOKENS` -> `NOAA_TOKENS` -> `NOAA_TOKEN`.
 
 ### Troubleshooting i kody diagnostyczne
 
@@ -127,6 +132,15 @@ W przyszłości dane z tego narzędzia mogą być używane jako warstwa wejścio
 python -m pytest -q
 ```
 
+## Zrodla danych i noty
+
+- Projekt korzysta z danych stacji publikowanych przez NOAA/NCEI API.
+- Warunki uzycia i limity API nalezy sprawdzac w oficjalnej dokumentacji NOAA: https://www.ncei.noaa.gov/cdo-web/webservices/v2
+- Projekt nie jest powiazany organizacyjnie z NOAA.
+- Dane zrodlowe sa dostarczane przez dostawce zewnetrznego i moga sie zmieniac niezaleznie od tego repozytorium.
+- Dodatkowe informacje prawne i noty zrodlowe znajduja sie w pliku NOTICE.
+
 ## Licencja
 
 Projekt jest udostępniany na licencji MIT.
+Szczegoly dotyczace zrodel danych i zaleznosci zewnetrznych: patrz plik NOTICE.
