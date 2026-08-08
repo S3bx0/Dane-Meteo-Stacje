@@ -34,6 +34,7 @@ pythonpath = ["."]
 [tool.coverage.run]
 source = ["dane_meteo_stacje"]
 parallel = true
+omit = ["dane_meteo_stacje/gui_bootstrap.py"]
 
 [tool.ruff]
 line-length = 120
