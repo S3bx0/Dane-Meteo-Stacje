@@ -61,9 +61,12 @@ def test_get_routes(gui_server):
     assert headers["content-type"] == "text/html; charset=utf-8"
     assert b"Dane Meteo Stacje" in body
 
-    status, _, body = _request(gui_server, "GET", "/health")
+    status, headers, body = _request(gui_server, "GET", "/health")
+    payload = json.loads(body)
     assert status == 200
-    assert json.loads(body) == {"ok": True}
+    assert payload["ok"] is True
+    assert len(payload["request_id"]) == 32
+    assert headers["x-request-id"] == payload["request_id"]
 
     status, _, body = _request(gui_server, "GET", "/missing")
     assert status == 404

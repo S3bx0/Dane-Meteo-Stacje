@@ -7,17 +7,16 @@ from collections.abc import Sequence
 from typing import Any
 
 from .data import (
-    NoaaAuthError,
     NoaaClientError,
-    NoaaNetworkError,
-    NoaaPayloadError,
-    NoaaRateLimitError,
     StationRecord,
     export_stations,
     fetch_stations_with_cache_details,
     load_stations,
     read_cache_metadata,
 )
+from .diagnostics import fetch_error_code as _fetch_error_code
+from .diagnostics import render_fetch_error as _render_fetch_error
+from .observability import configure_logging, log_event
 
 
 def _non_negative_int(value: str) -> int:
@@ -221,30 +220,6 @@ def _filter_stations_for_export(stations: list[StationRecord], station_id: str |
     return [station for station in stations if str(station.get("station_id", "")).lower() == station_id.lower()]
 
 
-def _render_fetch_error(exc: NoaaClientError) -> str:
-    if isinstance(exc, NoaaAuthError):
-        return "NOAA auth error: sprawdź token (NOAA_TOKEN) lub uprawnienia."
-    if isinstance(exc, NoaaRateLimitError):
-        return "NOAA rate limit: przekroczono limit zapytań (HTTP 429)."
-    if isinstance(exc, NoaaPayloadError):
-        return "NOAA payload error: nieobsługiwany format odpowiedzi NOAA."
-    if isinstance(exc, NoaaNetworkError):
-        return "NOAA network error: nie udało się pobrać danych z NOAA."
-    return "NOAA error: nie udało się pobrać danych."
-
-
-def _fetch_error_code(exc: NoaaClientError) -> str:
-    if isinstance(exc, NoaaAuthError):
-        return "NOAA_AUTH"
-    if isinstance(exc, NoaaRateLimitError):
-        return "NOAA_RATE_LIMIT"
-    if isinstance(exc, NoaaPayloadError):
-        return "NOAA_PAYLOAD"
-    if isinstance(exc, NoaaNetworkError):
-        return "NOAA_NETWORK"
-    return "NOAA_UNKNOWN"
-
-
 def _warning_code(fetch_source: str, fetch_metadata: dict[str, Any]) -> str:
     if fetch_source == "sample-fallback":
         return "FALLBACK_SAMPLE"
@@ -307,6 +282,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     verbose = bool(getattr(args, "verbose", False))
+    if verbose:
+        configure_logging("DEBUG")
+        log_event("cli_command_started", command=args.command)
     try:
         if args.command == "search":
             stations, fetch_source, fetch_metadata = _load_stations_from_runtime(args)
@@ -348,9 +326,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(json.dumps(metadata, ensure_ascii=False, indent=2))
             else:
                 print("{}")
+        if verbose:
+            log_event("cli_command_completed", command=args.command, exit_code=0)
         return 0
     except NoaaClientError as exc:
         code = _fetch_error_code(exc)
+        if verbose:
+            log_event("cli_command_failed", command=args.command, exit_code=2, error_code=code)
         print(f"[error][{code}] {_render_fetch_error(exc)}", file=sys.stderr)
         return 2
 

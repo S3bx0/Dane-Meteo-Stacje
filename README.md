@@ -36,11 +36,16 @@ Lub po instalacji skryptu:
 
 ```bash
 dane-meteo-stacje-gui
+dane-meteo-stacje-gui --log-level DEBUG
 ```
 
 Ze wzgledow bezpieczenstwa pole `Remote URL` w GUI akceptuje wylacznie adresy HTTPS
 w domenie `noaa.gov`. Interfejs CLI nadal obsluguje zewnetrzne zrodla JSON podane przez
 `--remote-url`.
+
+GUI zapisuje logi operacyjne jako pojedyncze obiekty JSON. Kazda odpowiedz API zawiera
+ten sam identyfikator korelacyjny w polu `request_id` i naglowku `X-Request-ID`, co pozwala
+powiazac blad widoczny w kliencie z logami serwera. Tokeny NOAA nie sa logowane.
 
 ### Wyszukiwanie stacji
 
@@ -130,6 +135,8 @@ W trybie --verbose pojawia się też wpis [debug] z metadanymi fetch_source i fe
 
 - `dane_meteo_stacje/cli.py` — interfejs wiersza poleceń
 - `dane_meteo_stacje/data.py` — przykładowe dane stacji
+- `dane_meteo_stacje/diagnostics.py` — wspolne kody i komunikaty bledow NOAA
+- `dane_meteo_stacje/observability.py` — strukturalne logi i correlation ID
 - `tests/` — testy regresyjne
 
 ## Współpraca z Heatmapa

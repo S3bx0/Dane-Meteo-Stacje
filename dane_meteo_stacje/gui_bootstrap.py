@@ -10,9 +10,12 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 from urllib.parse import urlparse
+from uuid import uuid4
 
-from .cli import _fetch_error_code, _render_fetch_error, search_stations
+from .cli import search_stations
 from .data import NoaaClientError, StationRecord, fetch_stations_with_cache_details
+from .diagnostics import fetch_error_code, render_fetch_error
+from .observability import bind_request_id, configure_logging, log_event, reset_request_id
 
 MAX_REQUEST_BODY_BYTES = 256 * 1024
 
@@ -566,39 +569,53 @@ def _csv_from_rows(rows: list[StationRecord]) -> str:
 
 
 class AppHandler(BaseHTTPRequestHandler):
+    request_id = ""
+
     def log_message(self, format: str, *args: Any) -> None:
         return
 
     def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/":
-            self._send_text(HTML_PAGE, content_type="text/html; charset=utf-8")
-            return
-        if parsed.path == "/health":
-            self._send_json({"ok": True})
-            return
-        self._send_json({"code": "NOT_FOUND", "message": "Not found"}, status=HTTPStatus.NOT_FOUND)
-
-    def do_POST(self) -> None:
+        self.request_id = uuid4().hex
+        context_token = bind_request_id(self.request_id)
+        log_event("http_request_started", method="GET", path=urlparse(self.path).path)
         try:
             parsed = urlparse(self.path)
-            if parsed.path == "/api/search":
-                self._handle_search()
+            if parsed.path == "/":
+                self._send_text(HTML_PAGE, content_type="text/html; charset=utf-8")
                 return
-            if parsed.path == "/api/export":
-                self._handle_export()
+            if parsed.path == "/health":
+                self._send_json({"ok": True})
                 return
             self._send_json({"code": "NOT_FOUND", "message": "Not found"}, status=HTTPStatus.NOT_FOUND)
-        except RequestBodyTooLarge as exc:
-            self._send_json(
-                {"code": "PAYLOAD_TOO_LARGE", "message": str(exc)},
-                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-            )
-        except InvalidRequestBody as exc:
-            self._send_json(
-                {"code": "BAD_REQUEST", "message": str(exc)},
-                status=HTTPStatus.BAD_REQUEST,
-            )
+        finally:
+            reset_request_id(context_token)
+
+    def do_POST(self) -> None:
+        self.request_id = uuid4().hex
+        context_token = bind_request_id(self.request_id)
+        log_event("http_request_started", method="POST", path=urlparse(self.path).path)
+        try:
+            try:
+                parsed = urlparse(self.path)
+                if parsed.path == "/api/search":
+                    self._handle_search()
+                    return
+                if parsed.path == "/api/export":
+                    self._handle_export()
+                    return
+                self._send_json({"code": "NOT_FOUND", "message": "Not found"}, status=HTTPStatus.NOT_FOUND)
+            except RequestBodyTooLarge as exc:
+                self._send_json(
+                    {"code": "PAYLOAD_TOO_LARGE", "message": str(exc)},
+                    status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                )
+            except InvalidRequestBody as exc:
+                self._send_json(
+                    {"code": "BAD_REQUEST", "message": str(exc)},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+        finally:
+            reset_request_id(context_token)
 
     def _read_json(self) -> dict[str, Any]:
         length = _parse_content_length(self.headers.get("Content-Length"))
@@ -612,20 +629,25 @@ class AppHandler(BaseHTTPRequestHandler):
             raise InvalidRequestBody("Request body must be valid UTF-8 JSON") from exc
 
     def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        response_payload = {**payload, "request_id": self.request_id}
+        body = json.dumps(response_payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Request-ID", self.request_id)
         self.end_headers()
         self.wfile.write(body)
+        log_event("http_response_sent", method=self.command, path=urlparse(self.path).path, status=int(status))
 
     def _send_text(self, payload: str, *, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = payload.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Request-ID", self.request_id)
         self.end_headers()
         self.wfile.write(body)
+        log_event("http_response_sent", method=self.command, path=urlparse(self.path).path, status=int(status))
 
     def _handle_search(self) -> None:
         payload = self._read_json()
@@ -707,8 +729,8 @@ class AppHandler(BaseHTTPRequestHandler):
         except NoaaClientError as exc:
             self._send_json(
                 {
-                    "code": _fetch_error_code(exc),
-                    "message": _render_fetch_error(exc),
+                    "code": fetch_error_code(exc),
+                    "message": render_fetch_error(exc),
                 },
                 status=HTTPStatus.BAD_GATEWAY,
             )
@@ -773,8 +795,10 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/csv; charset=utf-8")
             self.send_header("Content-Disposition", 'attachment; filename="stations.csv"')
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Request-ID", self.request_id)
             self.end_headers()
             self.wfile.write(body)
+            log_event("http_response_sent", method=self.command, path=urlparse(self.path).path, status=HTTPStatus.OK)
             return
 
         if fmt == "json":
@@ -783,8 +807,10 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Disposition", 'attachment; filename="stations.json"')
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Request-ID", self.request_id)
             self.end_headers()
             self.wfile.write(body)
+            log_event("http_response_sent", method=self.command, path=urlparse(self.path).path, status=HTTPStatus.OK)
             return
 
         self._send_json(
@@ -813,11 +839,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind the web server")
     parser.add_argument("--port", type=int, default=8765, help="Port to bind the web server")
     parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Structured log level",
+    )
+    parser.add_argument(
         "--no-browser",
         action="store_true",
         help="Do not auto-open browser window",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
+    configure_logging(args.log_level)
     run_server(args.host, args.port, open_browser=not args.no_browser)
     return 0
 

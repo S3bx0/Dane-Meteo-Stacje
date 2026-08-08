@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import logging
 import os
 import time
 from collections.abc import Sequence
@@ -10,9 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from random import SystemRandom
 from typing import Any, TypedDict, cast
+from urllib.parse import urlparse
 
 import requests
 from typing_extensions import NotRequired
+
+from .observability import log_event
 
 _RANDOM = SystemRandom()
 
@@ -621,6 +625,13 @@ def fetch_stations_with_cache_details(
     cache_file: Path | None = Path(cache_path) if cache_path is not None else None
     remote = remote_url or os.getenv("NOAA_STATIONS_URL")
     cache_metadata = read_cache_metadata(cache_file) if cache_file is not None else {}
+    remote_host = urlparse(remote).hostname if remote else None
+    log_event(
+        "station_fetch_started",
+        remote_host=remote_host,
+        refresh=refresh,
+        cache_enabled=cache_file is not None,
+    )
 
     if cache_file is not None and cache_file.exists() and not refresh:
         effective_ttl = max(cache_ttl, 0)
@@ -629,6 +640,12 @@ def fetch_stations_with_cache_details(
         if age_seconds <= effective_ttl and source_match:
             cached = load_stations(cache_file)
             if cached:
+                log_event(
+                    "station_fetch_completed",
+                    source="cache-fresh",
+                    count=len(cached),
+                    cache_age_seconds=age_seconds,
+                )
                 return FetchResult(
                     stations=cached,
                     source="cache-fresh",
@@ -652,6 +669,12 @@ def fetch_stations_with_cache_details(
                 token_provider=provider,
             )
         except NoaaClientError as exc:
+            log_event(
+                "station_fetch_failed",
+                level=logging.WARNING,
+                remote_host=remote_host,
+                error_type=type(exc).__name__,
+            )
             if stale_if_error and cache_file is not None and cache_file.exists():
                 stale_cached = load_stations(cache_file)
                 stale_age = _resolve_cache_age_seconds(cache_file, cache_metadata)
@@ -661,6 +684,12 @@ def fetch_stations_with_cache_details(
                         raise NoaaNetworkError(
                             f"Stale cache age {stale_age}s exceeds max_stale_seconds={max_stale_seconds}"
                         ) from exc
+                    log_event(
+                        "station_fetch_completed",
+                        source="cache-stale",
+                        count=len(stale_cached),
+                        cache_age_seconds=stale_age,
+                    )
                     return FetchResult(
                         stations=stale_cached,
                         source="cache-stale",
@@ -674,6 +703,7 @@ def fetch_stations_with_cache_details(
                         },
                     )
             if allow_sample_fallback:
+                log_event("station_fetch_completed", source="sample-fallback", count=len(STATIONS))
                 return FetchResult(
                     stations=[_clone_station(station) for station in STATIONS],
                     source="sample-fallback",
@@ -696,6 +726,13 @@ def fetch_stations_with_cache_details(
                     etag=remote_meta.get("etag"),
                     last_modified=remote_meta.get("last_modified"),
                 )
+            log_event(
+                "station_fetch_completed",
+                source="remote",
+                count=len(fetched),
+                remote_host=remote_host,
+                http_status=remote_meta.get("http_status"),
+            )
             return FetchResult(
                 stations=fetched,
                 source="remote",
@@ -703,6 +740,7 @@ def fetch_stations_with_cache_details(
             )
 
         if allow_sample_fallback:
+            log_event("station_fetch_completed", source="sample-fallback", count=len(STATIONS))
             return FetchResult(
                 stations=[_clone_station(station) for station in STATIONS],
                 source="sample-fallback",
@@ -714,6 +752,7 @@ def fetch_stations_with_cache_details(
     if cache_file is not None and cache_file.exists():
         cached = load_stations(cache_file)
         if cached:
+            log_event("station_fetch_completed", source="cache", count=len(cached))
             return FetchResult(
                 stations=cached,
                 source="cache",
@@ -724,6 +763,7 @@ def fetch_stations_with_cache_details(
                 },
             )
 
+    log_event("station_fetch_completed", source="sample-default", count=len(STATIONS))
     return FetchResult(
         stations=[_clone_station(station) for station in STATIONS],
         source="sample-default",
