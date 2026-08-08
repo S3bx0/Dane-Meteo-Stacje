@@ -112,7 +112,15 @@ def test_infer_country_fallbacks():
     assert _infer_country_from_noaa_item({"country": "Poland"}, "PLM00012295") == "Poland"
     assert _infer_country_from_noaa_item({"location": {"country": "Germany"}}, "DEM00000001") == "Germany"
     assert _infer_country_from_noaa_item({}, "USW00014898") == "USA"
-    assert _infer_country_from_noaa_item({}, "PLM00012295") == "Unknown"
+    assert _infer_country_from_noaa_item({}, "PLM00012295") == "Poland"
+
+
+def test_infer_country_maps_two_letter_country_code_to_name():
+    assert _infer_country_from_noaa_item({"country": "PL"}, "PLM00012295") == "Poland"
+
+
+def test_infer_country_uses_station_prefix_mapping_for_pl():
+    assert _infer_country_from_noaa_item({}, "PL000012120") == "Poland"
 
 
 def test_normalize_station_rejects_invalid_objects():
@@ -136,6 +144,27 @@ def test_load_stations_accepts_dict_with_stations_and_invalid_json(tmp_path):
 
 def test_normalize_noaa_payload_returns_empty_for_unsupported_shape():
     assert _normalize_noaa_payload("bad-shape") == []
+
+
+def test_normalize_noaa_payload_collects_geo_stats():
+    stats: dict[str, int] = {}
+    stations = _normalize_noaa_payload(
+        {
+            "results": [
+                {"id": "PL0001", "name": "Leba", "country": "PL", "latitude": 54.75, "longitude": 17.55},
+                {"id": "PL0002", "name": "No Geo", "country": "PL"},
+                {"id": "PL0003", "name": "Bad Geo", "country": "PL", "latitude": 120.0, "longitude": 10.0},
+            ]
+        },
+        stats=stats,
+    )
+
+    assert len(stations) == 3
+    assert stations[0]["country"] == "Poland"
+    assert stations[0]["latitude"] == 54.75
+    assert stats["geo_valid"] == 1
+    assert stats["geo_missing"] == 1
+    assert stats["geo_out_of_range"] == 1
 
 
 def test_fetch_stations_with_cache_returns_sample_default_without_remote(tmp_path):

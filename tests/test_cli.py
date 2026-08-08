@@ -668,3 +668,22 @@ def test_pretty_flag_formats_output_for_human_readability(tmp_path):
     assert result.returncode == 0
     data = json.loads(output_json.read_text(encoding="utf-8"))
     assert data
+
+
+def test_verbose_reports_noaa_normalization_drops(capsys):
+    from dane_meteo_stacje.cli import _emit_warning
+
+    _emit_warning(
+        "remote",
+        {
+            "normalization": {
+                "items_total": 2,
+                "items_invalid": 1,
+            }
+        },
+        verbose=True,
+    )
+
+    captured = capsys.readouterr()
+    assert "[warning][NOAA_NORMALIZATION]" in captured.err
+    assert "[debug]" in captured.err

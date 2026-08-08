@@ -258,8 +258,24 @@ def _warning_code(fetch_source: str, fetch_metadata: dict[str, Any]) -> str:
 
 
 def _emit_warning(fetch_source: str, fetch_metadata: dict[str, Any], verbose: bool) -> None:
+    normalization = fetch_metadata.get("normalization")
+    if isinstance(normalization, dict):
+        invalid = normalization.get("items_invalid")
+        total = normalization.get("items_total")
+        if isinstance(invalid, int) and isinstance(total, int) and invalid > 0:
+            print(
+                f"[warning][NOAA_NORMALIZATION] Odrzucono {invalid}/{total} rekordow NOAA podczas mapowania.",
+                file=sys.stderr,
+            )
+
     warning = fetch_metadata.get("warning")
     if not warning:
+        if verbose:
+            debug_payload = {
+                "fetch_source": fetch_source,
+                "fetch_metadata": fetch_metadata,
+            }
+            print(f"[debug] {json.dumps(debug_payload, ensure_ascii=False, sort_keys=True)}", file=sys.stderr)
         return
 
     code = _warning_code(fetch_source, fetch_metadata)

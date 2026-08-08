@@ -47,6 +47,8 @@ class StationRecord(TypedDict):
     city: str
     name: str
     country: str
+    latitude: NotRequired[float]
+    longitude: NotRequired[float]
     source: NotRequired[str]
     notes: NotRequired[str]
 
@@ -126,6 +128,22 @@ def _token_fingerprint(token: str | None) -> str | None:
 
 def _clone_station(station: StationRecord) -> StationRecord:
     return cast(StationRecord, dict(station))
+
+
+COUNTRY_CODE_MAP: dict[str, str] = {
+    "PL": "Poland",
+    "US": "USA",
+    "DE": "Germany",
+    "FR": "France",
+    "IT": "Italy",
+    "ES": "Spain",
+    "GB": "United Kingdom",
+    "CZ": "Czechia",
+    "SK": "Slovakia",
+    "LT": "Lithuania",
+    "LV": "Latvia",
+    "EE": "Estonia",
+}
 
 STATIONS: list[StationRecord] = [
     {
@@ -284,19 +302,53 @@ def _extract_city_from_noaa_item(item: dict[str, Any], name: str) -> str:
 
 
 def _infer_country_from_noaa_item(item: dict[str, Any], station_id: str) -> str:
+    def _normalize_country_value(raw_value: Any) -> str | None:
+        if not isinstance(raw_value, str):
+            return None
+        value = raw_value.strip()
+        if not value:
+            return None
+        if len(value) == 2:
+            return COUNTRY_CODE_MAP.get(value.upper(), value.upper())
+        return value
+
+    def _country_from_station_prefix(station_code: str) -> str | None:
+        prefix = station_code[:2].upper()
+        return COUNTRY_CODE_MAP.get(prefix)
+
     country = item.get("country")
-    if isinstance(country, str) and country.strip():
-        return country.strip()
+    normalized_country = _normalize_country_value(country)
+    if normalized_country:
+        return normalized_country
 
     location = item.get("location")
     if isinstance(location, dict):
-        location_country = location.get("country")
-        if isinstance(location_country, str) and location_country.strip():
-            return location_country.strip()
+        normalized_location_country = _normalize_country_value(location.get("country"))
+        if normalized_location_country:
+            return normalized_location_country
 
-    if station_id.startswith("US"):
-        return "USA"
+    from_prefix = _country_from_station_prefix(station_id)
+    if from_prefix:
+        return from_prefix
     return "Unknown"
+
+
+def _extract_lat_lon(item: dict[str, Any]) -> tuple[float | None, float | None]:
+    lat: Any = item.get("latitude")
+    lon: Any = item.get("longitude")
+
+    if (lat is None or lon is None) and isinstance(item.get("coordinates"), dict):
+        coords = cast(dict[str, Any], item["coordinates"])
+        lat = coords.get("latitude", lat)
+        lon = coords.get("longitude", lon)
+
+    try:
+        lat_f = float(lat) if lat is not None else None
+        lon_f = float(lon) if lon is not None else None
+    except (TypeError, ValueError):
+        return None, None
+
+    return lat_f, lon_f
 
 
 def _normalize_noaa_payload(payload: Any, *, stats: dict[str, int] | None = None) -> list[StationRecord]:
@@ -306,6 +358,9 @@ def _normalize_noaa_payload(payload: Any, *, stats: dict[str, int] | None = None
     quality.setdefault("items_invalid", 0)
     quality.setdefault("invalid_not_object", 0)
     quality.setdefault("invalid_missing_id_or_name", 0)
+    quality.setdefault("geo_valid", 0)
+    quality.setdefault("geo_missing", 0)
+    quality.setdefault("geo_out_of_range", 0)
 
     if isinstance(payload, dict):
         results = payload.get("results")
@@ -337,16 +392,26 @@ def _normalize_noaa_payload(payload: Any, *, stats: dict[str, int] | None = None
 
         city_name = _extract_city_from_noaa_item(item, str(name))
         country_name = _infer_country_from_noaa_item(item, str(station_id))
-        normalized_records.append(
-            {
-                "station_id": str(station_id),
-                "city": city_name,
-                "name": str(name),
-                "country": country_name,
-                "source": "NOAA",
-                "notes": "Mapped from NOAA station payload",
-            }
-        )
+        normalized_record: StationRecord = {
+            "station_id": str(station_id),
+            "city": city_name,
+            "name": str(name),
+            "country": country_name,
+            "source": "NOAA",
+            "notes": "Mapped from NOAA station payload",
+        }
+
+        lat, lon = _extract_lat_lon(item)
+        if lat is None or lon is None:
+            quality["geo_missing"] += 1
+        elif -90 <= lat <= 90 and -180 <= lon <= 180:
+            normalized_record["latitude"] = lat
+            normalized_record["longitude"] = lon
+            quality["geo_valid"] += 1
+        else:
+            quality["geo_out_of_range"] += 1
+
+        normalized_records.append(normalized_record)
         quality["items_valid"] += 1
     return normalized_records
 
