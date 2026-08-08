@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
-from pathlib import Path
+import sys
 from typing import Sequence
 
-from .data import export_stations, fetch_stations_with_cache, load_stations, read_cache_metadata
+from .data import (
+    NoaaAuthError,
+    NoaaClientError,
+    NoaaNetworkError,
+    NoaaPayloadError,
+    NoaaRateLimitError,
+    export_stations,
+    fetch_stations_with_cache_details,
+    load_stations,
+    read_cache_metadata,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,6 +35,17 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--country", help="Filtruj wyniki po kraju")
     search_parser.add_argument("--station-id", help="Filtruj wyniki po ID stacji")
     search_parser.add_argument("--sort", choices=["city", "name", "station_id"], default="city", help="Sortowanie wyników")
+    search_parser.add_argument(
+        "--allow-sample-fallback",
+        action="store_true",
+        help="W razie błędu NOAA użyj danych przykładowych zamiast błędu",
+    )
+    search_parser.add_argument(
+        "--stale-if-error",
+        action="store_true",
+        help="W razie błędu NOAA użyj przeterminowanego cache, jeśli istnieje",
+    )
+    search_parser.add_argument("--verbose", action="store_true", help="Pokaż dodatkowe informacje diagnostyczne")
 
     info_parser = subparsers.add_parser("info", help="Pokaż informacje o stacji")
     info_parser.add_argument("station_id", help="ID stacji NOAA")
@@ -35,6 +55,17 @@ def build_parser() -> argparse.ArgumentParser:
     info_parser.add_argument("--remote-url", help="URL z danymi stacji w formacie JSON")
     info_parser.add_argument("--cache-ttl", type=int, default=3600, help="TTL cache w sekundach")
     info_parser.add_argument("--refresh", action="store_true", help="Wymuś odświeżenie danych z zewnętrznego źródła")
+    info_parser.add_argument(
+        "--allow-sample-fallback",
+        action="store_true",
+        help="W razie błędu NOAA użyj danych przykładowych zamiast błędu",
+    )
+    info_parser.add_argument(
+        "--stale-if-error",
+        action="store_true",
+        help="W razie błędu NOAA użyj przeterminowanego cache, jeśli istnieje",
+    )
+    info_parser.add_argument("--verbose", action="store_true", help="Pokaż dodatkowe informacje diagnostyczne")
 
     export_parser = subparsers.add_parser("export", help="Eksportuj dane stacji do JSON/CSV")
     export_parser.add_argument("--output-json", help="Ścieżka do pliku JSON")
@@ -47,6 +78,17 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--pretty", action="store_true", help="Zapisuj JSON w czytelnej, sformatowanej formie")
     export_parser.add_argument("--station-id", help="Eksportuj tylko stację o podanym ID")
     export_parser.add_argument("--noaa-like", action="store_true", help="Zapisuj dane w formacie zbliżonym do NOAA")
+    export_parser.add_argument(
+        "--allow-sample-fallback",
+        action="store_true",
+        help="W razie błędu NOAA użyj danych przykładowych zamiast błędu",
+    )
+    export_parser.add_argument(
+        "--stale-if-error",
+        action="store_true",
+        help="W razie błędu NOAA użyj przeterminowanego cache, jeśli istnieje",
+    )
+    export_parser.add_argument("--verbose", action="store_true", help="Pokaż dodatkowe informacje diagnostyczne")
 
     cache_meta_parser = subparsers.add_parser("cache-meta", help="Pokaż metadane lokalnego cache")
     cache_meta_parser.add_argument("cache_path", help="Ścieżka do pliku cache")
@@ -94,6 +136,7 @@ def print_search_results(
     as_json: bool = False,
     show_source: bool = False,
     cache_metadata: dict | None = None,
+    fetch_source: str | None = None,
 ) -> None:
     if not results:
         if as_json:
@@ -110,12 +153,86 @@ def print_search_results(
         line = f"{station['city']} | {station['name']} | {station['station_id']}"
         if show_source:
             source_parts = [f"source: {station.get('source', 'unknown')}"]
+            if fetch_source:
+                source_parts.append(f"fetch source: {fetch_source}")
             if cache_metadata:
                 timestamp = cache_metadata.get("timestamp")
                 if timestamp is not None:
                     source_parts.append(f"cache timestamp: {timestamp}")
             line += f" | {' | '.join(source_parts)}"
         print(line)
+
+
+def _load_stations_from_runtime(args: argparse.Namespace) -> tuple[list[dict], str, dict]:
+    if getattr(args, "source", None):
+        return load_stations(args.source), "source-file", {}
+
+    result = fetch_stations_with_cache_details(
+        cache_path=getattr(args, "cache", None),
+        remote_url=getattr(args, "remote_url", None),
+        cache_ttl=getattr(args, "cache_ttl", 3600),
+        refresh=getattr(args, "refresh", False),
+        allow_sample_fallback=getattr(args, "allow_sample_fallback", False),
+        stale_if_error=getattr(args, "stale_if_error", False),
+    )
+    return result.stations, result.source, result.metadata
+
+
+def _filter_stations_for_export(stations: list[dict], station_id: str | None) -> list[dict]:
+    if station_id is None:
+        return stations
+    return [station for station in stations if str(station.get("station_id", "")).lower() == station_id.lower()]
+
+
+def _render_fetch_error(exc: NoaaClientError) -> str:
+    if isinstance(exc, NoaaAuthError):
+        return "NOAA auth error: sprawdź token (NOAA_TOKEN) lub uprawnienia."
+    if isinstance(exc, NoaaRateLimitError):
+        return "NOAA rate limit: przekroczono limit zapytań (HTTP 429)."
+    if isinstance(exc, NoaaPayloadError):
+        return "NOAA payload error: nieobsługiwany format odpowiedzi NOAA."
+    if isinstance(exc, NoaaNetworkError):
+        return "NOAA network error: nie udało się pobrać danych z NOAA."
+    return "NOAA error: nie udało się pobrać danych."
+
+
+def _fetch_error_code(exc: NoaaClientError) -> str:
+    if isinstance(exc, NoaaAuthError):
+        return "NOAA_AUTH"
+    if isinstance(exc, NoaaRateLimitError):
+        return "NOAA_RATE_LIMIT"
+    if isinstance(exc, NoaaPayloadError):
+        return "NOAA_PAYLOAD"
+    if isinstance(exc, NoaaNetworkError):
+        return "NOAA_NETWORK"
+    return "NOAA_UNKNOWN"
+
+
+def _warning_code(fetch_source: str, fetch_metadata: dict) -> str:
+    if fetch_source == "sample-fallback":
+        return "FALLBACK_SAMPLE"
+    if fetch_source == "cache-stale":
+        return "FALLBACK_STALE_CACHE"
+    if fetch_source == "sample-default":
+        return "SOURCE_SAMPLE_DEFAULT"
+    if fetch_metadata.get("warning"):
+        return "FETCH_WARNING"
+    return "INFO"
+
+
+def _emit_warning(fetch_source: str, fetch_metadata: dict, verbose: bool) -> None:
+    warning = fetch_metadata.get("warning")
+    if not warning:
+        return
+
+    code = _warning_code(fetch_source, fetch_metadata)
+    print(f"[warning][{code}] {warning}", file=sys.stderr)
+    if verbose:
+        debug_payload = {
+            "fetch_source": fetch_source,
+            "fetch_metadata": fetch_metadata,
+        }
+        print(f"[debug] {json.dumps(debug_payload, ensure_ascii=False, sort_keys=True)}", file=sys.stderr)
 
 
 def print_station_info(station_id: str, as_json: bool = False, stations: Sequence[dict] | None = None) -> None:
@@ -136,97 +253,52 @@ def print_station_info(station_id: str, as_json: bool = False, stations: Sequenc
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
-    if args.command == "search":
-        if getattr(args, "source", None):
-            stations = load_stations(args.source)
-            cache_metadata = None
-        else:
-            stations = fetch_stations_with_cache(
-                getattr(args, "cache", None),
-                getattr(args, "remote_url", None),
-                cache_ttl=getattr(args, "cache_ttl", 3600),
-                refresh=getattr(args, "refresh", False),
-            )
+    verbose = bool(getattr(args, "verbose", False))
+    try:
+        if args.command == "search":
+            stations, fetch_source, fetch_metadata = _load_stations_from_runtime(args)
             cache_metadata = read_cache_metadata(getattr(args, "cache", None)) if getattr(args, "cache", None) else None
-        print_search_results(
-            search_stations(
-                args.query,
-                stations=stations,
-                limit=getattr(args, "limit", None),
-                country=getattr(args, "country", None),
-                station_id=getattr(args, "station_id", None),
-                sort_by=getattr(args, "sort", "city"),
-            ),
-            as_json=args.json,
-            show_source=getattr(args, "show_source", False),
-            cache_metadata=cache_metadata,
-        )
-    elif args.command == "info":
-        if getattr(args, "source", None):
-            stations = load_stations(args.source)
-        else:
-            stations = fetch_stations_with_cache(
-                getattr(args, "cache", None),
-                getattr(args, "remote_url", None),
-                cache_ttl=getattr(args, "cache_ttl", 3600),
-                refresh=getattr(args, "refresh", False),
+            print_search_results(
+                search_stations(
+                    args.query,
+                    stations=stations,
+                    limit=getattr(args, "limit", None),
+                    country=getattr(args, "country", None),
+                    station_id=getattr(args, "station_id", None),
+                    sort_by=getattr(args, "sort", "city"),
+                ),
+                as_json=args.json,
+                show_source=getattr(args, "show_source", False),
+                cache_metadata=cache_metadata,
+                fetch_source=fetch_source,
             )
-        print_station_info(args.station_id, as_json=args.json, stations=stations)
-    elif args.command == "export":
-        stations = load_stations(args.source) if getattr(args, "source", None) else fetch_stations_with_cache(
-            getattr(args, "cache", None),
-            getattr(args, "remote_url", None),
-            cache_ttl=getattr(args, "cache_ttl", 3600),
-            refresh=getattr(args, "refresh", False),
-        )
-        station_id = getattr(args, "station_id", None)
-        if station_id is not None:
-            stations = [station for station in stations if str(station.get("station_id", "")).lower() == station_id.lower()]
-
-        if getattr(args, "noaa_like", False):
-            export_payload = {
-                "metadata": {"resultset": {"count": len(stations)}},
-                "results": [
-                    {
-                        "id": station.get("station_id"),
-                        "name": station.get("name"),
-                        "city": station.get("city"),
-                        "country": station.get("country"),
-                        "source": station.get("source", "local"),
-                    }
-                    for station in stations
-                ],
-            }
-            if args.output_json is not None:
-                Path(args.output_json).write_text(json.dumps(export_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            if args.output_csv is not None:
-                with Path(args.output_csv).open("w", encoding="utf-8", newline="") as handle:
-                    writer = csv.DictWriter(handle, fieldnames=["id", "name", "city", "country", "source"])
-                    writer.writeheader()
-                    for station in stations:
-                        writer.writerow(
-                            {
-                                "id": station.get("station_id"),
-                                "name": station.get("name"),
-                                "city": station.get("city"),
-                                "country": station.get("country"),
-                                "source": station.get("source", "local"),
-                            }
-                        )
-        else:
+            _emit_warning(fetch_source, fetch_metadata, verbose)
+        elif args.command == "info":
+            stations, fetch_source, fetch_metadata = _load_stations_from_runtime(args)
+            print_station_info(args.station_id, as_json=args.json, stations=stations)
+            _emit_warning(fetch_source, fetch_metadata, verbose)
+        elif args.command == "export":
+            stations, fetch_source, fetch_metadata = _load_stations_from_runtime(args)
+            stations = _filter_stations_for_export(stations, getattr(args, "station_id", None))
             export_stations(
                 stations,
                 output_json=args.output_json,
                 output_csv=args.output_csv,
                 pretty=getattr(args, "pretty", False),
+                noaa_like=getattr(args, "noaa_like", False),
             )
-    elif args.command == "cache-meta":
-        metadata = read_cache_metadata(args.cache_path)
-        if metadata:
-            print(json.dumps(metadata, ensure_ascii=False, indent=2))
-        else:
-            print("{}")
-    return 0
+            _emit_warning(fetch_source, fetch_metadata, verbose)
+        elif args.command == "cache-meta":
+            metadata = read_cache_metadata(args.cache_path)
+            if metadata:
+                print(json.dumps(metadata, ensure_ascii=False, indent=2))
+            else:
+                print("{}")
+        return 0
+    except NoaaClientError as exc:
+        code = _fetch_error_code(exc)
+        print(f"[error][{code}] {_render_fetch_error(exc)}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

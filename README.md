@@ -12,6 +12,8 @@ Projekt dostarcza lekką warstwę CLI do:
 - wyświetlania informacji o stacji,
 - eksportu danych do JSON lub CSV,
 - pracy z lokalnym cache i zewnętrznym źródłem danych,
+- kontrolowanego fallbacku przy błędach NOAA,
+- diagnostyki źródła danych i kodów błędów,
 - łatwego integrowania z innymi narzędziami analitycznymi lub skryptami.
 
 Obecnie repo zawiera przykładowe dane dla kilku stacji oraz obsługę danych zewnętrznych i cache.
@@ -68,6 +70,40 @@ python -m dane_meteo_stacje search Bialystok --cache cache.json --remote-url htt
 python -m dane_meteo_stacje search Bialystok --refresh --show-source
 python -m dane_meteo_stacje cache-meta cache.json
 ```
+
+### Niezawodność i fallback
+
+```bash
+python -m dane_meteo_stacje search Bialystok --remote-url https://example.com/stations.json --stale-if-error
+python -m dane_meteo_stacje search Bialystok --remote-url https://example.com/stations.json --allow-sample-fallback
+python -m dane_meteo_stacje search Bialystok --remote-url https://example.com/stations.json --allow-sample-fallback --verbose
+```
+
+### Tokeny NOAA
+
+```bash
+# pojedynczy token
+set NOAA_TOKEN=twoj_token
+
+# pula tokenow (rotacja)
+set NOAA_TOKENS=token_a,token_b,token_c
+```
+
+### Troubleshooting i kody diagnostyczne
+
+Przy problemach z NOAA CLI zwraca kod wyjścia 2 oraz komunikat w stderr z kodem błędu:
+
+- [error][NOAA_AUTH] - błędny token lub brak uprawnień (401/403)
+- [error][NOAA_RATE_LIMIT] - przekroczony limit zapytań (429)
+- [error][NOAA_NETWORK] - problemy sieciowe lub chwilowa niedostępność API
+- [error][NOAA_PAYLOAD] - nieobsługiwany format odpowiedzi NOAA
+
+Przy fallbackach wypisywane są ostrzeżenia:
+
+- [warning][FALLBACK_STALE_CACHE] - użyto przeterminowanego cache
+- [warning][FALLBACK_SAMPLE] - użyto danych przykładowych
+
+W trybie --verbose pojawia się też wpis [debug] z metadanymi fetch_source i fetch_metadata.
 
 ## Struktura projektu
 

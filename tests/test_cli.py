@@ -165,7 +165,7 @@ def test_expired_cache_is_ignored_when_ttl_elapsed(tmp_path):
         check=False,
     )
 
-    assert result.returncode == 0
+    assert result.returncode == 2
     assert "Cache City" not in result.stdout
 
 
@@ -192,8 +192,109 @@ def test_refresh_flag_forces_remote_fetch_when_cache_exists(tmp_path):
         check=False,
     )
 
-    assert result.returncode == 0
+    assert result.returncode == 2
     assert "Cache City" not in result.stdout
+
+
+def test_remote_error_can_use_sample_fallback_when_enabled(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dane_meteo_stacje",
+            "search",
+            "Bialystok",
+            "--remote-url",
+            "https://example.invalid/stations.json",
+            "--allow-sample-fallback",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "PLM00012295" in result.stdout
+    assert "[warning][FALLBACK_SAMPLE]" in result.stderr
+
+
+def test_stale_cache_can_be_used_when_remote_fails_and_flag_enabled(tmp_path):
+    cache_file = tmp_path / "cache.json"
+    cache_file.write_text(json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]), encoding="utf-8")
+    old_time = time.time() - 7200
+    os.utime(cache_file, (old_time, old_time))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dane_meteo_stacje",
+            "search",
+            "cache",
+            "--cache",
+            str(cache_file),
+            "--remote-url",
+            "https://example.invalid/stations.json",
+            "--cache-ttl",
+            "0",
+            "--stale-if-error",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Cache City" in result.stdout
+    assert "[warning][FALLBACK_STALE_CACHE]" in result.stderr
+
+
+def test_verbose_mode_prints_debug_metadata_for_warning():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dane_meteo_stacje",
+            "search",
+            "Bialystok",
+            "--remote-url",
+            "https://example.invalid/stations.json",
+            "--allow-sample-fallback",
+            "--verbose",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "[warning][FALLBACK_SAMPLE]" in result.stderr
+    assert "[debug]" in result.stderr
+
+
+def test_remote_error_without_fallback_returns_coded_error(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dane_meteo_stacje",
+            "search",
+            "Bialystok",
+            "--remote-url",
+            "https://example.invalid/stations.json",
+            "--refresh",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "[error][NOAA_NETWORK]" in result.stderr
 
 
 def test_noaa_payload_is_mapped_to_station_dict():
@@ -444,6 +545,7 @@ def test_noaa_payload_with_state_and_region_is_mapped():
 
     stations = _normalize_noaa_payload(payload)
     assert stations[0]["city"] == "Texas"
+    assert stations[0]["country"] == "USA"
 
 
 def test_noaa_payload_with_nested_fields_is_mapped():
@@ -464,6 +566,26 @@ def test_noaa_payload_with_nested_fields_is_mapped():
     stations = _normalize_noaa_payload(payload)
     assert stations[0]["city"] == "Newark"
     assert stations[0]["station_id"] == "USW00013739"
+    assert stations[0]["country"] == "USA"
+
+
+def test_noaa_payload_prefers_country_from_payload_when_available():
+    from dane_meteo_stacje.data import _normalize_noaa_payload
+
+    payload = {
+        "results": [
+            {
+                "id": "CA000011111",
+                "name": "MONTREAL STATION",
+                "city": "Montreal",
+                "country": "Canada",
+            }
+        ]
+    }
+
+    stations = _normalize_noaa_payload(payload)
+    assert stations[0]["city"] == "Montreal"
+    assert stations[0]["country"] == "Canada"
 
 
 def test_pretty_flag_formats_output_for_human_readability(tmp_path):
