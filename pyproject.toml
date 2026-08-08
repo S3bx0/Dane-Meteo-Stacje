@@ -30,6 +30,10 @@ dane-meteo-stacje = "dane_meteo_stacje.cli:main"
 testpaths = ["tests"]
 pythonpath = ["."]
 
+[tool.coverage.run]
+source = ["dane_meteo_stacje"]
+parallel = true
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

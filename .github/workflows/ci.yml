@@ -30,4 +30,6 @@ jobs:
         run: python -m mypy
 
       - name: Pytest with coverage
+        env:
+          COVERAGE_PROCESS_START: pyproject.toml
         run: python -m pytest --cov=dane_meteo_stacje --cov-report=term-missing --cov-fail-under=85

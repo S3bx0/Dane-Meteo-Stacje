@@ -11,5 +11,6 @@ build/
 dist/
 *.egg-info/
 .coverage
+.coverage*
 htmlcov/
 SCIAGAWKA_KRAJE_EUROPA.md
