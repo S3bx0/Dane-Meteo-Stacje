@@ -39,6 +39,14 @@ dane-meteo-stacje search Bialystok
 dane-meteo-stacje info PLM00012295
 ```
 
+### Cache i NOAA
+
+```bash
+python -m dane_meteo_stacje search Bialystok --cache cache.json --remote-url https://example.com/stations.json
+python -m dane_meteo_stacje search Bialystok --refresh --show-source
+python -m dane_meteo_stacje cache-meta cache.json
+```
+
 ## Struktura projektu
 
 - `dane_meteo_stacje/cli.py` — interfejs wiersza poleceń
