@@ -2,6 +2,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from dane_meteo_stacje import data
 from dane_meteo_stacje.data import FetchResult, NoaaNetworkError, fetch_stations_with_cache_details, read_cache_metadata
 
@@ -143,3 +145,28 @@ def test_fetch_result_contains_cache_metadata_when_used(tmp_path):
 
     assert result.source == "cache-fresh"
     assert result.metadata["cache_metadata"]["source_url"] == "https://example.com/stations"
+
+
+def test_stale_cache_raises_when_older_than_max_stale(tmp_path, monkeypatch):
+    cache_file = tmp_path / "cache.json"
+    old_ts = int(time.time()) - 7200
+    _write_cache(
+        cache_file,
+        [{"station_id": "C4", "city": "Cached", "name": "Cached", "country": "Poland"}],
+        fetched_at=old_ts,
+        source_url="https://example.com/stations",
+    )
+
+    def fake_fetch_remote_stations(remote, token=None, token_provider=None):
+        raise NoaaNetworkError("HTTP 503")
+
+    monkeypatch.setattr(data, "fetch_remote_stations", fake_fetch_remote_stations)
+
+    with pytest.raises(NoaaNetworkError):
+        fetch_stations_with_cache_details(
+            cache_path=cache_file,
+            remote_url="https://example.com/stations",
+            cache_ttl=0,
+            stale_if_error=True,
+            max_stale_seconds=60,
+        )

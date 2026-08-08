@@ -102,3 +102,45 @@ def test_fetch_remote_stations_fails_when_all_tokens_unhealthy():
             client=fake_client,
             token_provider=provider,
         )
+
+
+def test_token_provider_from_env_supports_noaa_api_tokens(monkeypatch):
+    monkeypatch.setenv("NOAA_API_TOKENS", "api-a, api-b")
+    monkeypatch.setenv("NOAA_TOKENS", "pool-a")
+    monkeypatch.setenv("NOAA_TOKEN", "single-a")
+
+    provider = TokenProvider.from_env()
+
+    # Preserves priority order NOAA_API_TOKENS -> NOAA_TOKENS -> NOAA_TOKEN.
+    assert provider.acquire() == "api-a"
+    assert provider.acquire() == "api-b"
+    assert provider.acquire() == "pool-a"
+    assert provider.acquire() == "single-a"
+
+
+def test_fetch_remote_stations_reports_noaa_normalization_quality():
+    class DictPayloadClient:
+        def fetch_json(self, url: str, token: str | None = None):
+            return (
+                {
+                    "results": [
+                        {"id": "USW00011111", "name": "BALTIMORE STATION", "country": "USA"},
+                        {"id": "", "name": "Missing ID"},
+                        "not-an-object",
+                    ]
+                },
+                200,
+                {"etag": "etag-x", "last_modified": "Mon, 01 Jan 2024 00:00:00 GMT"},
+            )
+
+    stations, metadata = fetch_remote_stations(
+        "https://example.invalid/stations",
+        client=DictPayloadClient(),
+        token="token-x",
+    )
+
+    assert len(stations) == 1
+    assert metadata["payload_shape"] == "noaa-results"
+    assert metadata["normalization"]["items_total"] == 3
+    assert metadata["normalization"]["items_valid"] == 1
+    assert metadata["normalization"]["items_invalid"] == 2

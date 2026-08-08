@@ -251,6 +251,39 @@ def test_stale_cache_can_be_used_when_remote_fails_and_flag_enabled(tmp_path):
     assert "[warning][FALLBACK_STALE_CACHE]" in result.stderr
 
 
+def test_stale_cache_respects_max_stale_limit(tmp_path):
+    cache_file = tmp_path / "cache.json"
+    cache_file.write_text(json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]), encoding="utf-8")
+    old_time = time.time() - 7200
+    os.utime(cache_file, (old_time, old_time))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dane_meteo_stacje",
+            "search",
+            "cache",
+            "--cache",
+            str(cache_file),
+            "--remote-url",
+            "https://example.invalid/stations.json",
+            "--cache-ttl",
+            "0",
+            "--stale-if-error",
+            "--max-stale",
+            "60",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "[error][NOAA_NETWORK]" in result.stderr
+
+
 def test_verbose_mode_prints_debug_metadata_for_warning():
     result = subprocess.run(
         [
@@ -395,6 +428,32 @@ def test_search_limit_limits_results(tmp_path):
     assert "Test Alpha" in result.stdout
     assert "Test Beta" in result.stdout
     assert "Test Gamma" not in result.stdout
+
+
+def test_search_rejects_zero_limit(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-m", "dane_meteo_stacje", "search", "test", "--limit", "0"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "Wartość musi być > 0" in result.stderr
+
+
+def test_search_rejects_negative_cache_ttl(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-m", "dane_meteo_stacje", "search", "test", "--cache-ttl", "-1"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "Wartość musi być >= 0" in result.stderr
 
 
 def test_search_can_filter_by_country(tmp_path):

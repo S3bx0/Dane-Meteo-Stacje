@@ -1,5 +1,3 @@
-import json
-
 from dane_meteo_stacje.data import to_noaa_like_payload
 
 

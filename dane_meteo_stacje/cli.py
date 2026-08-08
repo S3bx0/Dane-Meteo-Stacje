@@ -3,7 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from .data import (
     NoaaAuthError,
@@ -11,11 +12,26 @@ from .data import (
     NoaaNetworkError,
     NoaaPayloadError,
     NoaaRateLimitError,
+    StationRecord,
     export_stations,
     fetch_stations_with_cache_details,
     load_stations,
     read_cache_metadata,
 )
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("Wartość musi być >= 0")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("Wartość musi być > 0")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,13 +44,18 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--source", help="Ścieżka do pliku JSON ze stacjami")
     search_parser.add_argument("--cache", help="Ścieżka do lokalnego cache JSON")
     search_parser.add_argument("--remote-url", help="URL z danymi stacji w formacie JSON")
-    search_parser.add_argument("--cache-ttl", type=int, default=3600, help="TTL cache w sekundach")
+    search_parser.add_argument("--cache-ttl", type=_non_negative_int, default=3600, help="TTL cache w sekundach")
     search_parser.add_argument("--refresh", action="store_true", help="Wymuś odświeżenie danych z zewnętrznego źródła")
     search_parser.add_argument("--show-source", action="store_true", help="Pokaż źródło danych przy każdym wyniku")
-    search_parser.add_argument("--limit", type=int, help="Maksymalna liczba wyników do wyświetlenia")
+    search_parser.add_argument("--limit", type=_positive_int, help="Maksymalna liczba wyników do wyświetlenia")
     search_parser.add_argument("--country", help="Filtruj wyniki po kraju")
     search_parser.add_argument("--station-id", help="Filtruj wyniki po ID stacji")
-    search_parser.add_argument("--sort", choices=["city", "name", "station_id"], default="city", help="Sortowanie wyników")
+    search_parser.add_argument(
+        "--sort",
+        choices=["city", "name", "station_id"],
+        default="city",
+        help="Sortowanie wyników",
+    )
     search_parser.add_argument(
         "--allow-sample-fallback",
         action="store_true",
@@ -45,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="W razie błędu NOAA użyj przeterminowanego cache, jeśli istnieje",
     )
+    search_parser.add_argument(
+        "--max-stale",
+        type=_non_negative_int,
+        help="Maksymalny wiek przeterminowanego cache (sekundy) dla --stale-if-error",
+    )
     search_parser.add_argument("--verbose", action="store_true", help="Pokaż dodatkowe informacje diagnostyczne")
 
     info_parser = subparsers.add_parser("info", help="Pokaż informacje o stacji")
@@ -53,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     info_parser.add_argument("--source", help="Ścieżka do pliku JSON ze stacjami")
     info_parser.add_argument("--cache", help="Ścieżka do lokalnego cache JSON")
     info_parser.add_argument("--remote-url", help="URL z danymi stacji w formacie JSON")
-    info_parser.add_argument("--cache-ttl", type=int, default=3600, help="TTL cache w sekundach")
+    info_parser.add_argument("--cache-ttl", type=_non_negative_int, default=3600, help="TTL cache w sekundach")
     info_parser.add_argument("--refresh", action="store_true", help="Wymuś odświeżenie danych z zewnętrznego źródła")
     info_parser.add_argument(
         "--allow-sample-fallback",
@@ -65,6 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="W razie błędu NOAA użyj przeterminowanego cache, jeśli istnieje",
     )
+    info_parser.add_argument(
+        "--max-stale",
+        type=_non_negative_int,
+        help="Maksymalny wiek przeterminowanego cache (sekundy) dla --stale-if-error",
+    )
     info_parser.add_argument("--verbose", action="store_true", help="Pokaż dodatkowe informacje diagnostyczne")
 
     export_parser = subparsers.add_parser("export", help="Eksportuj dane stacji do JSON/CSV")
@@ -73,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--source", help="Ścieżka do pliku JSON ze stacjami")
     export_parser.add_argument("--cache", help="Ścieżka do lokalnego cache JSON")
     export_parser.add_argument("--remote-url", help="URL z danymi stacji w formacie JSON")
-    export_parser.add_argument("--cache-ttl", type=int, default=3600, help="TTL cache w sekundach")
+    export_parser.add_argument("--cache-ttl", type=_non_negative_int, default=3600, help="TTL cache w sekundach")
     export_parser.add_argument("--refresh", action="store_true", help="Wymuś odświeżenie danych z zewnętrznego źródła")
     export_parser.add_argument("--pretty", action="store_true", help="Zapisuj JSON w czytelnej, sformatowanej formie")
     export_parser.add_argument("--station-id", help="Eksportuj tylko stację o podanym ID")
@@ -88,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="W razie błędu NOAA użyj przeterminowanego cache, jeśli istnieje",
     )
+    export_parser.add_argument(
+        "--max-stale",
+        type=_non_negative_int,
+        help="Maksymalny wiek przeterminowanego cache (sekundy) dla --stale-if-error",
+    )
     export_parser.add_argument("--verbose", action="store_true", help="Pokaż dodatkowe informacje diagnostyczne")
 
     cache_meta_parser = subparsers.add_parser("cache-meta", help="Pokaż metadane lokalnego cache")
@@ -98,12 +134,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def search_stations(
     query: str,
-    stations: Sequence[dict] | None = None,
+    stations: Sequence[StationRecord] | None = None,
     limit: int | None = None,
     country: str | None = None,
     station_id: str | None = None,
     sort_by: str = "city",
-) -> list[dict]:
+) -> list[StationRecord]:
     q = query.strip().lower()
     if not q:
         return []
@@ -132,10 +168,10 @@ def search_stations(
 
 
 def print_search_results(
-    results: Sequence[dict],
+    results: Sequence[StationRecord],
     as_json: bool = False,
     show_source: bool = False,
-    cache_metadata: dict | None = None,
+    cache_metadata: dict[str, Any] | None = None,
     fetch_source: str | None = None,
 ) -> None:
     if not results:
@@ -163,7 +199,7 @@ def print_search_results(
         print(line)
 
 
-def _load_stations_from_runtime(args: argparse.Namespace) -> tuple[list[dict], str, dict]:
+def _load_stations_from_runtime(args: argparse.Namespace) -> tuple[list[StationRecord], str, dict[str, Any]]:
     if getattr(args, "source", None):
         return load_stations(args.source), "source-file", {}
 
@@ -174,11 +210,12 @@ def _load_stations_from_runtime(args: argparse.Namespace) -> tuple[list[dict], s
         refresh=getattr(args, "refresh", False),
         allow_sample_fallback=getattr(args, "allow_sample_fallback", False),
         stale_if_error=getattr(args, "stale_if_error", False),
+        max_stale_seconds=getattr(args, "max_stale", None),
     )
     return result.stations, result.source, result.metadata
 
 
-def _filter_stations_for_export(stations: list[dict], station_id: str | None) -> list[dict]:
+def _filter_stations_for_export(stations: list[StationRecord], station_id: str | None) -> list[StationRecord]:
     if station_id is None:
         return stations
     return [station for station in stations if str(station.get("station_id", "")).lower() == station_id.lower()]
@@ -208,7 +245,7 @@ def _fetch_error_code(exc: NoaaClientError) -> str:
     return "NOAA_UNKNOWN"
 
 
-def _warning_code(fetch_source: str, fetch_metadata: dict) -> str:
+def _warning_code(fetch_source: str, fetch_metadata: dict[str, Any]) -> str:
     if fetch_source == "sample-fallback":
         return "FALLBACK_SAMPLE"
     if fetch_source == "cache-stale":
@@ -220,7 +257,7 @@ def _warning_code(fetch_source: str, fetch_metadata: dict) -> str:
     return "INFO"
 
 
-def _emit_warning(fetch_source: str, fetch_metadata: dict, verbose: bool) -> None:
+def _emit_warning(fetch_source: str, fetch_metadata: dict[str, Any], verbose: bool) -> None:
     warning = fetch_metadata.get("warning")
     if not warning:
         return
@@ -235,7 +272,7 @@ def _emit_warning(fetch_source: str, fetch_metadata: dict, verbose: bool) -> Non
         print(f"[debug] {json.dumps(debug_payload, ensure_ascii=False, sort_keys=True)}", file=sys.stderr)
 
 
-def print_station_info(station_id: str, as_json: bool = False, stations: Sequence[dict] | None = None) -> None:
+def print_station_info(station_id: str, as_json: bool = False, stations: Sequence[StationRecord] | None = None) -> None:
     station = next((item for item in list(stations or load_stations()) if item["station_id"] == station_id), None)
     if station is None:
         if as_json:
@@ -257,7 +294,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "search":
             stations, fetch_source, fetch_metadata = _load_stations_from_runtime(args)
-            cache_metadata = read_cache_metadata(getattr(args, "cache", None)) if getattr(args, "cache", None) else None
+            cache_path = getattr(args, "cache", None)
+            cache_metadata = read_cache_metadata(cache_path) if isinstance(cache_path, str) else None
             print_search_results(
                 search_stations(
                     args.query,

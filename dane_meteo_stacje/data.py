@@ -4,12 +4,15 @@ import csv
 import hashlib
 import json
 import os
+import random
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NotRequired, Sequence, TypedDict
+from typing import Any, TypedDict, cast
 
 import requests
+from typing_extensions import NotRequired
 
 
 class NoaaClientError(Exception):
@@ -66,8 +69,12 @@ class TokenProvider:
         self._blocked_until: dict[str, float] = {}
 
     @classmethod
-    def from_env(cls) -> "TokenProvider":
+    def from_env(cls) -> TokenProvider:
         tokens: list[str] = []
+        api_tokens_env = os.getenv("NOAA_API_TOKENS", "")
+        if api_tokens_env.strip():
+            tokens.extend([token.strip() for token in api_tokens_env.split(",") if token.strip()])
+
         tokens_env = os.getenv("NOAA_TOKENS", "")
         if tokens_env.strip():
             tokens.extend([token.strip() for token in tokens_env.split(",") if token.strip()])
@@ -75,7 +82,9 @@ class TokenProvider:
         single_token = os.getenv("NOAA_TOKEN", "").strip()
         if single_token and single_token not in tokens:
             tokens.append(single_token)
-        return cls(tokens)
+        # Keep order while removing duplicates.
+        unique_tokens = list(dict.fromkeys(tokens))
+        return cls(unique_tokens)
 
     def has_tokens(self) -> bool:
         return bool(self._tokens)
@@ -114,6 +123,10 @@ def _token_fingerprint(token: str | None) -> str | None:
         return None
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:10]
 
+
+def _clone_station(station: StationRecord) -> StationRecord:
+    return cast(StationRecord, dict(station))
+
 STATIONS: list[StationRecord] = [
     {
         "station_id": "PLM00012295",
@@ -138,15 +151,24 @@ class NoaaClient:
     def __init__(
         self,
         timeout: int = 10,
-        max_retries: int = 2,
+        max_retries_rate_limit: int = 2,
+        max_retries_server_error: int = 2,
         backoff_seconds: float = 0.25,
+        jitter_seconds: float = 0.05,
         user_agent: str = "dane-meteo-stacje/0.2",
     ) -> None:
         self.timeout = timeout
-        self.max_retries = max_retries
+        self.max_retries_rate_limit = max_retries_rate_limit
+        self.max_retries_server_error = max_retries_server_error
         self.backoff_seconds = backoff_seconds
+        self.jitter_seconds = max(jitter_seconds, 0.0)
         self.user_agent = user_agent
         self._session = requests.Session()
+
+    def _sleep_with_backoff(self, attempt: int) -> None:
+        base = self.backoff_seconds * (2**attempt)
+        jitter = random.uniform(0, self.jitter_seconds) if self.jitter_seconds > 0 else 0.0
+        time.sleep(base + jitter)
 
     def fetch_json(self, url: str, token: str | None = None) -> tuple[Any, int, dict[str, str]]:
         headers: dict[str, str] = {"User-Agent": self.user_agent}
@@ -155,12 +177,16 @@ class NoaaClient:
             headers["token"] = token
             headers["Authorization"] = f"Bearer {token}"
 
-        for attempt in range(self.max_retries + 1):
+        rate_retries_used = 0
+        server_retries_used = 0
+
+        while True:
             try:
                 response = self._session.get(url, timeout=self.timeout, headers=headers)
             except requests.RequestException as exc:
-                if attempt < self.max_retries:
-                    time.sleep(self.backoff_seconds * (2**attempt))
+                if server_retries_used < self.max_retries_server_error:
+                    self._sleep_with_backoff(server_retries_used)
+                    server_retries_used += 1
                     continue
                 raise NoaaNetworkError(str(exc)) from exc
 
@@ -168,13 +194,15 @@ class NoaaClient:
             if status in (401, 403):
                 raise NoaaAuthError(f"HTTP {status}")
             if status == 429:
-                if attempt < self.max_retries:
-                    time.sleep(self.backoff_seconds * (2**attempt))
+                if rate_retries_used < self.max_retries_rate_limit:
+                    self._sleep_with_backoff(rate_retries_used)
+                    rate_retries_used += 1
                     continue
                 raise NoaaRateLimitError("HTTP 429")
             if status >= 500:
-                if attempt < self.max_retries:
-                    time.sleep(self.backoff_seconds * (2**attempt))
+                if server_retries_used < self.max_retries_server_error:
+                    self._sleep_with_backoff(server_retries_used)
+                    server_retries_used += 1
                     continue
                 raise NoaaNetworkError(f"HTTP {status}")
             if status >= 400:
@@ -188,8 +216,6 @@ class NoaaClient:
                 return response.json(), status, metadata_headers
             except ValueError as exc:
                 raise NoaaPayloadError("Response is not valid JSON") from exc
-
-        raise NoaaNetworkError("Unexpected NOAA fetch failure")
 
 
 def _normalize_station(item: Any) -> StationRecord | None:
@@ -273,7 +299,14 @@ def _infer_country_from_noaa_item(item: dict[str, Any], station_id: str) -> str:
     return "Unknown"
 
 
-def _normalize_noaa_payload(payload: Any) -> list[StationRecord]:
+def _normalize_noaa_payload(payload: Any, *, stats: dict[str, int] | None = None) -> list[StationRecord]:
+    quality = stats if stats is not None else {}
+    quality.setdefault("items_total", 0)
+    quality.setdefault("items_valid", 0)
+    quality.setdefault("items_invalid", 0)
+    quality.setdefault("invalid_not_object", 0)
+    quality.setdefault("invalid_missing_id_or_name", 0)
+
     if isinstance(payload, dict):
         results = payload.get("results")
         if not isinstance(results, list):
@@ -285,11 +318,21 @@ def _normalize_noaa_payload(payload: Any) -> list[StationRecord]:
 
     normalized_records: list[StationRecord] = []
     for item in results:
+        quality["items_total"] += 1
         if not isinstance(item, dict):
+            quality["items_invalid"] += 1
+            quality["invalid_not_object"] += 1
             continue
         station_id = item.get("id") or item.get("station_id")
         name = item.get("name") or item.get("station") or item.get("id")
-        if not station_id or not name:
+        if (
+            not station_id
+            or not name
+            or not str(station_id).strip()
+            or not str(name).strip()
+        ):
+            quality["items_invalid"] += 1
+            quality["invalid_missing_id_or_name"] += 1
             continue
 
         city_name = _extract_city_from_noaa_item(item, str(name))
@@ -304,12 +347,13 @@ def _normalize_noaa_payload(payload: Any) -> list[StationRecord]:
                 "notes": "Mapped from NOAA station payload",
             }
         )
+        quality["items_valid"] += 1
     return normalized_records
 
 
 def load_stations(source: str | Path | None = None) -> list[StationRecord]:
     if source is None:
-        return [dict(station) for station in STATIONS]
+        return [_clone_station(station) for station in STATIONS]
 
     path = Path(source)
     if not path.exists():
@@ -390,7 +434,8 @@ def fetch_remote_stations(
     elif isinstance(payload, dict) and isinstance(payload.get("stations"), list):
         records = payload["stations"]
     else:
-        records = _normalize_noaa_payload(payload)
+        normalization_stats: dict[str, int] = {}
+        records = _normalize_noaa_payload(payload, stats=normalization_stats)
         if records:
             return records, {
                 "http_status": http_status,
@@ -398,6 +443,7 @@ def fetch_remote_stations(
                 "token_fingerprint": _token_fingerprint(active_token),
                 "etag": response_meta.get("etag") or None,
                 "last_modified": response_meta.get("last_modified") or None,
+                "normalization": normalization_stats,
             }
         raise NoaaPayloadError("Unsupported NOAA payload format")
 
@@ -427,7 +473,10 @@ def read_cache_metadata(cache_path: str | Path) -> dict[str, Any]:
         return {}
 
     try:
-        return json.loads(metadata_path.read_text(encoding="utf-8"))
+        parsed = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if isinstance(parsed, dict):
+            return cast(dict[str, Any], parsed)
+        return {}
     except (OSError, json.JSONDecodeError):
         return {}
 
@@ -498,6 +547,7 @@ def fetch_stations_with_cache_details(
     refresh: bool = False,
     allow_sample_fallback: bool = False,
     stale_if_error: bool = False,
+    max_stale_seconds: int | None = None,
     token: str | None = None,
     token_provider: TokenProvider | None = None,
 ) -> FetchResult:
@@ -537,13 +587,20 @@ def fetch_stations_with_cache_details(
         except NoaaClientError as exc:
             if stale_if_error and cache_file is not None and cache_file.exists():
                 stale_cached = load_stations(cache_file)
+                stale_age = _resolve_cache_age_seconds(cache_file, cache_metadata)
+                stale_allowed = max_stale_seconds is None or stale_age <= max_stale_seconds
                 if stale_cached:
+                    if not stale_allowed:
+                        raise NoaaNetworkError(
+                            f"Stale cache age {stale_age}s exceeds max_stale_seconds={max_stale_seconds}"
+                        ) from exc
                     return FetchResult(
                         stations=stale_cached,
                         source="cache-stale",
                         metadata={
                             "cache_path": str(cache_file),
-                            "cache_age_seconds": _resolve_cache_age_seconds(cache_file, cache_metadata),
+                            "cache_age_seconds": stale_age,
+                            "max_stale_seconds": max_stale_seconds,
                             "cache_metadata": cache_metadata,
                             "warning": str(exc),
                             "remote_url": remote,
@@ -551,7 +608,7 @@ def fetch_stations_with_cache_details(
                     )
             if allow_sample_fallback:
                 return FetchResult(
-                    stations=[dict(station) for station in STATIONS],
+                    stations=[_clone_station(station) for station in STATIONS],
                     source="sample-fallback",
                     metadata={"warning": str(exc), "remote_url": remote},
                 )
@@ -580,7 +637,7 @@ def fetch_stations_with_cache_details(
 
         if allow_sample_fallback:
             return FetchResult(
-                stations=[dict(station) for station in STATIONS],
+                stations=[_clone_station(station) for station in STATIONS],
                 source="sample-fallback",
                 metadata={"remote_url": remote, "warning": "Remote returned no stations"},
             )
@@ -601,7 +658,7 @@ def fetch_stations_with_cache_details(
             )
 
     return FetchResult(
-        stations=[dict(station) for station in STATIONS],
+        stations=[_clone_station(station) for station in STATIONS],
         source="sample-default",
         metadata={"warning": "No remote source configured"},
     )
