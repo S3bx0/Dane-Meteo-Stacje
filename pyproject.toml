@@ -12,6 +12,7 @@ authors = [{name = "Sebastian"}]
 license = {text = "MIT"}
 dependencies = [
 	"requests>=2.31.0",
+	"typing-extensions>=4.4.0",
 ]
 
 [project.optional-dependencies]
