@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 from typing import Sequence
 
-from .data import STATIONS
+from .data import load_stations
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,19 +14,27 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser = subparsers.add_parser("search", help="Wyszukaj stację po nazwie miasta")
     search_parser.add_argument("query", help="Nazwa miasta lub części nazwy")
     search_parser.add_argument("--json", action="store_true", help="Wypisz wyniki w formacie JSON")
+    search_parser.add_argument("--source", help="Ścieżka do pliku JSON ze stacjami")
 
     info_parser = subparsers.add_parser("info", help="Pokaż informacje o stacji")
     info_parser.add_argument("station_id", help="ID stacji NOAA")
     info_parser.add_argument("--json", action="store_true", help="Wypisz informacje w formacie JSON")
+    info_parser.add_argument("--source", help="Ścieżka do pliku JSON ze stacjami")
 
     return parser
 
 
-def search_stations(query: str) -> list[dict]:
+def search_stations(query: str, stations: Sequence[dict] | None = None) -> list[dict]:
     q = query.strip().lower()
     if not q:
         return []
-    return [station for station in STATIONS if q in station["name"].lower() or q in station["city"].lower()]
+
+    station_list = list(stations or load_stations())
+    return [
+        station
+        for station in station_list
+        if q in str(station["name"]).lower() or q in str(station["city"]).lower()
+    ]
 
 
 def print_search_results(results: Sequence[dict], as_json: bool = False) -> None:
@@ -46,8 +53,8 @@ def print_search_results(results: Sequence[dict], as_json: bool = False) -> None
         print(f"{station['city']} | {station['name']} | {station['station_id']}")
 
 
-def print_station_info(station_id: str, as_json: bool = False) -> None:
-    station = next((item for item in STATIONS if item["station_id"] == station_id), None)
+def print_station_info(station_id: str, as_json: bool = False, stations: Sequence[dict] | None = None) -> None:
+    station = next((item for item in list(stations or load_stations()) if item["station_id"] == station_id), None)
     if station is None:
         if as_json:
             print(json.dumps({"station_id": station_id, "found": False}, ensure_ascii=False))
@@ -65,9 +72,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.command == "search":
-        print_search_results(search_stations(args.query), as_json=args.json)
+        stations = load_stations(args.source) if getattr(args, "source", None) else None
+        print_search_results(search_stations(args.query, stations=stations), as_json=args.json)
     elif args.command == "info":
-        print_station_info(args.station_id, as_json=args.json)
+        stations = load_stations(args.source) if getattr(args, "source", None) else None
+        print_station_info(args.station_id, as_json=args.json, stations=stations)
     return 0
 
 

@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -45,3 +46,34 @@ def test_search_can_output_json():
 
     assert result.returncode == 0
     assert '"station_id": "PLM00012295"' in result.stdout
+
+
+def test_search_can_load_station_data_from_json_file(tmp_path):
+    custom_source = tmp_path / "stations.json"
+    custom_source.write_text(
+        json.dumps(
+            [
+                {
+                    "station_id": "XYZ123456",
+                    "city": "Berlin",
+                    "name": "Berlin",
+                    "country": "Germany",
+                    "source": "custom-json",
+                    "notes": "loaded from a file",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "dane_meteo_stacje", "search", "Berlin", "--source", str(custom_source)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Berlin" in result.stdout
+    assert "XYZ123456" in result.stdout
