@@ -38,8 +38,8 @@ HTML_PAGE = """<!doctype html>
       <section class="panel rounded-4 shadow-sm p-3 p-md-4 mb-3">
         <div class="row g-3">
           <div class="col-md-4">
-            <label class="form-label">Query</label>
-            <input id="query" class="form-control" value="Bialystok" />
+            <label class="form-label">Query (optional)</label>
+            <input id="query" class="form-control" placeholder="city or station name" />
           </div>
           <div class="col-md-2">
             <label class="form-label">Country</label>
@@ -70,7 +70,7 @@ HTML_PAGE = """<!doctype html>
               class="form-control mono"
               placeholder="https://www.ncei.noaa.gov/cdo-web/api/v2/stations?..."
             />
-            <div class="form-text">Example: FIPS:PL (Poland), FIPS:HU (Hungary), FIPS:AU (Austria).</div>
+            <div class="form-text">Example: FIPS:PL (Poland), FIPS:HU (Hungary), FIPS:SP (Spain).</div>
           </div>
           <div class="col-md-3">
             <label class="form-label">Cache Path</label>
@@ -580,12 +580,6 @@ class AppHandler(BaseHTTPRequestHandler):
     def _handle_search(self) -> None:
         payload = self._read_json()
         query = str(payload.get("query", "")).strip()
-        if not query:
-            self._send_json(
-                {"code": "BAD_REQUEST", "message": "query is required"},
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
 
         try:
             cache_ttl = _parse_int(payload.get("cache_ttl"), default=3600, minimum=0)
@@ -616,14 +610,42 @@ class AppHandler(BaseHTTPRequestHandler):
                 stale_if_error=bool(payload.get("stale_if_error", False)),
                 max_stale_seconds=max_stale,
             )
-            rows = search_stations(
-                query=query,
-                stations=result.stations,
-                limit=limit,
-                country=str(country) if country else None,
-                station_id=str(station_id) if station_id else None,
-                sort_by=sort_by,
-            )
+            normalized_country = str(country).strip() if country else None
+            normalized_station_id = str(station_id).strip() if station_id else None
+
+            if query:
+                rows = search_stations(
+                    query=query,
+                    stations=result.stations,
+                    limit=limit,
+                    country=normalized_country,
+                    station_id=normalized_station_id,
+                    sort_by=sort_by,
+                )
+            else:
+                rows = list(result.stations)
+                if normalized_country:
+                    rows = [
+                        row
+                        for row in rows
+                        if str(row.get("country", "")).lower() == normalized_country.lower()
+                    ]
+                if normalized_station_id:
+                    rows = [
+                        row
+                        for row in rows
+                        if str(row.get("station_id", "")).lower() == normalized_station_id.lower()
+                    ]
+
+                if sort_by == "name":
+                    rows = sorted(rows, key=lambda row: str(row.get("name", "")).lower())
+                elif sort_by == "station_id":
+                    rows = sorted(rows, key=lambda row: str(row.get("station_id", "")).lower())
+                else:
+                    rows = sorted(rows, key=lambda row: str(row.get("city", "")).lower())
+
+                if limit is not None:
+                    rows = rows[:limit]
         except NoaaClientError as exc:
             self._send_json(
                 {
