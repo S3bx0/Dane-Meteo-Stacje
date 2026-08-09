@@ -42,7 +42,7 @@ jobs:
       - name: Pytest with coverage
         env:
           COVERAGE_PROCESS_START: pyproject.toml
-        run: python -m pytest --cov=dane_meteo_stacje --cov-report=term-missing --cov-fail-under=85
+        run: python -m pytest --cov=dane_meteo_stacje --cov-report=term-missing --cov-fail-under=90
 
   compatibility:
     runs-on: ubuntu-latest

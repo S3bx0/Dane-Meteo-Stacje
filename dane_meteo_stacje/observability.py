@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import traceback
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
 from typing import Any, TextIO
@@ -50,6 +51,7 @@ def log_event(
     event: str,
     *,
     level: int = logging.INFO,
+    exc_info: bool = False,
     request_id: str | None = None,
     fields: Mapping[str, Any] | None = None,
     **extra_fields: Any,
@@ -61,4 +63,6 @@ def log_event(
     if fields:
         payload.update(fields)
     payload.update(extra_fields)
+    if exc_info:
+        payload["traceback"] = traceback.format_exc()
     _logger.log(level, json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))

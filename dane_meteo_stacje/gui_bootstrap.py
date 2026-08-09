@@ -4,8 +4,10 @@ import argparse
 import csv
 import io
 import json
+import logging
+import time
 import webbrowser
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
@@ -575,47 +577,72 @@ class AppHandler(BaseHTTPRequestHandler):
         return
 
     def do_GET(self) -> None:
-        self.request_id = uuid4().hex
-        context_token = bind_request_id(self.request_id)
-        log_event("http_request_started", method="GET", path=urlparse(self.path).path)
-        try:
-            parsed = urlparse(self.path)
-            if parsed.path == "/":
-                self._send_text(HTML_PAGE, content_type="text/html; charset=utf-8")
-                return
-            if parsed.path == "/health":
-                self._send_json({"ok": True})
-                return
-            self._send_json({"code": "NOT_FOUND", "message": "Not found"}, status=HTTPStatus.NOT_FOUND)
-        finally:
-            reset_request_id(context_token)
+        self._run_request("GET", self._dispatch_get)
 
     def do_POST(self) -> None:
+        self._run_request("POST", self._dispatch_post)
+
+    def _run_request(self, method: str, dispatch: Callable[[], None]) -> None:
         self.request_id = uuid4().hex
         context_token = bind_request_id(self.request_id)
-        log_event("http_request_started", method="POST", path=urlparse(self.path).path)
+        path = urlparse(self.path).path
+        started_at = time.monotonic()
+        log_event("http_request_started", method=method, path=path)
         try:
+            dispatch()
+        except (BrokenPipeError, ConnectionResetError):
+            log_event("http_client_disconnected", level=logging.WARNING, method=method, path=path)
+        except Exception as exc:
+            log_event(
+                "http_request_failed",
+                level=logging.ERROR,
+                exc_info=True,
+                method=method,
+                path=path,
+                error_type=type(exc).__name__,
+            )
             try:
-                parsed = urlparse(self.path)
-                if parsed.path == "/api/search":
-                    self._handle_search()
-                    return
-                if parsed.path == "/api/export":
-                    self._handle_export()
-                    return
-                self._send_json({"code": "NOT_FOUND", "message": "Not found"}, status=HTTPStatus.NOT_FOUND)
-            except RequestBodyTooLarge as exc:
                 self._send_json(
-                    {"code": "PAYLOAD_TOO_LARGE", "message": str(exc)},
-                    status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    {"code": "INTERNAL_ERROR", "message": "Internal server error"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
-            except InvalidRequestBody as exc:
-                self._send_json(
-                    {"code": "BAD_REQUEST", "message": str(exc)},
-                    status=HTTPStatus.BAD_REQUEST,
-                )
+            except (BrokenPipeError, ConnectionResetError):
+                log_event("http_client_disconnected", level=logging.WARNING, method=method, path=path)
         finally:
+            duration_ms = round((time.monotonic() - started_at) * 1000, 3)
+            log_event("http_request_completed", method=method, path=path, duration_ms=duration_ms)
             reset_request_id(context_token)
+
+    def _dispatch_get(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/":
+            self._send_text(HTML_PAGE, content_type="text/html; charset=utf-8")
+            return
+        if parsed.path == "/health":
+            self._send_json({"ok": True})
+            return
+        self._send_json({"code": "NOT_FOUND", "message": "Not found"}, status=HTTPStatus.NOT_FOUND)
+
+    def _dispatch_post(self) -> None:
+        try:
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/search":
+                self._handle_search()
+                return
+            if parsed.path == "/api/export":
+                self._handle_export()
+                return
+            self._send_json({"code": "NOT_FOUND", "message": "Not found"}, status=HTTPStatus.NOT_FOUND)
+        except RequestBodyTooLarge as exc:
+            self._send_json(
+                {"code": "PAYLOAD_TOO_LARGE", "message": str(exc)},
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        except InvalidRequestBody as exc:
+            self._send_json(
+                {"code": "BAD_REQUEST", "message": str(exc)},
+                status=HTTPStatus.BAD_REQUEST,
+            )
 
     def _read_json(self) -> dict[str, Any]:
         length = _parse_content_length(self.headers.get("Content-Length"))

@@ -52,7 +52,9 @@ w domenie `noaa.gov`. Interfejs CLI nadal obsluguje zewnetrzne zrodla JSON podan
 
 GUI zapisuje logi operacyjne jako pojedyncze obiekty JSON. Kazda odpowiedz API zawiera
 ten sam identyfikator korelacyjny w polu `request_id` i naglowku `X-Request-ID`, co pozwala
-powiazac blad widoczny w kliencie z logami serwera. Tokeny NOAA nie sa logowane.
+powiazac blad widoczny w kliencie z logami serwera. Nieoczekiwany blad zwraca bezpieczny
+kod `INTERNAL_ERROR`, a szczegoly i traceback pozostaja w logach serwera. Log zakonczenia
+zadania zawiera czas obslugi `duration_ms`. Tokeny NOAA nie sa logowane.
 
 ### Wyszukiwanie stacji
 
@@ -162,7 +164,7 @@ W przyszłości dane z tego narzędzia mogą być używane jako warstwa wejścio
 python -m pytest -q
 ```
 
-CI blokuje zmiany, ktore nie przechodza Ruff, mypy, testow z coverage co najmniej 85%,
+CI blokuje zmiany, ktore nie przechodza Ruff, mypy, testow z coverage co najmniej 90%,
 skanu kodu Bandit albo audytu zaleznosci pip-audit. Osobny workflow `NOAA Smoke`
 codziennie sprawdza rzeczywiste API NOAA z sekretem `NOAA_API_TOKENS`; mozna go tez
 uruchomic recznie w GitHub Actions.

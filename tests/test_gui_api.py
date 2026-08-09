@@ -1,4 +1,5 @@
 import http.client
+import io
 import json
 import threading
 from collections.abc import Iterator
@@ -8,6 +9,7 @@ import pytest
 
 import dane_meteo_stacje.gui_bootstrap as gui
 from dane_meteo_stacje.data import FetchResult, NoaaNetworkError
+from dane_meteo_stacje.observability import configure_logging, log_event
 
 
 @pytest.fixture
@@ -151,6 +153,65 @@ def test_search_maps_noaa_errors(gui_server, monkeypatch):
 
     assert status == 502
     assert json.loads(body)["code"] == "NOAA_NETWORK"
+
+
+def test_unexpected_error_returns_safe_correlated_500_and_logs_traceback(gui_server, monkeypatch):
+    stream = io.StringIO()
+    configure_logging("INFO", stream=stream)
+    request_completed = threading.Event()
+    real_log_event = gui.log_event
+
+    def capture_log_event(event, **fields):
+        real_log_event(event, **fields)
+        if event == "http_request_completed":
+            request_completed.set()
+
+    def fail_fetch(**kwargs):
+        raise RuntimeError("internal diagnostic detail")
+
+    monkeypatch.setattr(gui, "log_event", capture_log_event)
+    monkeypatch.setattr(gui, "fetch_stations_with_cache_details", fail_fetch)
+    status, headers, body = _request(gui_server, "POST", "/api/search", {})
+    payload = json.loads(body)
+    assert request_completed.wait(timeout=1)
+
+    assert status == 500
+    assert payload["code"] == "INTERNAL_ERROR"
+    assert payload["message"] == "Internal server error"
+    assert "internal diagnostic detail" not in body.decode("utf-8")
+    assert headers["x-request-id"] == payload["request_id"]
+
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    failed_event = next(event for event in events if event["event"] == "http_request_failed")
+    completed_event = next(event for event in events if event["event"] == "http_request_completed")
+    assert failed_event["request_id"] == payload["request_id"]
+    assert failed_event["error_type"] == "RuntimeError"
+    assert completed_event["request_id"] == payload["request_id"]
+    assert completed_event["duration_ms"] >= 0
+    assert "Traceback (most recent call last)" in failed_event["traceback"]
+    assert "internal diagnostic detail" in failed_event["traceback"]
+
+
+def test_client_disconnect_is_logged_and_request_context_is_reset(monkeypatch):
+    events = []
+    handler = object.__new__(gui.AppHandler)
+    handler.path = "/health"
+    monkeypatch.setattr(gui, "log_event", lambda event, **fields: events.append((event, fields)))
+
+    handler._run_request("GET", lambda: (_ for _ in ()).throw(BrokenPipeError()))
+
+    assert [event for event, _ in events] == [
+        "http_request_started",
+        "http_client_disconnected",
+        "http_request_completed",
+    ]
+    assert events[1][1]["level"] == gui.logging.WARNING
+    assert events[2][1]["duration_ms"] >= 0
+
+    stream = io.StringIO()
+    configure_logging("INFO", stream=stream)
+    log_event("after_disconnected_request")
+    assert "request_id" not in json.loads(stream.getvalue())
 
 
 def test_export_json_normalizes_rows(gui_server):
