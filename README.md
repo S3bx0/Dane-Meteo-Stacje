@@ -179,7 +179,12 @@ pliki sa dostepne w artefakcie `python-distributions` danego runu GitHub Actions
 
 Wydania sa tworzone automatycznie po wypchnieciu taga `vX.Y.Z`, jezeli tag jest zgodny
 z wersja pakietu i wszystkie testy wydania przejda. Procedura znajduje sie w `RELEASING.md`,
-a historia zmian w `CHANGELOG.md`. Samo wypchniecie zmian na `main` nie publikuje wydania.
+a historia zmian w `CHANGELOG.md`. Wydanie zawiera wheel, sdist, CycloneDX SBOM, sumy SHA-256
+i GitHub Artifact Attestation. Samo wypchniecie zmian na `main` nie publikuje wydania.
+
+Zewnetrzne GitHub Actions sa przypiete do pelnych commit SHA. CodeQL analizuje kod Pythona
+na `main`, w pull requestach i wedlug tygodniowego harmonogramu. GitHub Secret Scanning
+z push protection oraz aktualizacje bezpieczenstwa Dependabota sa wlaczone dla repozytorium.
 
 ## Zrodla danych i noty
 

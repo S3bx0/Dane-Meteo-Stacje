@@ -5,6 +5,16 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- CycloneDX SBOM, sumy SHA-256 i GitHub Artifact Attestation dla nowych wydan.
+- Analiza CodeQL dla kodu Pythona na `main`, w pull requestach i co tydzien.
+
+### Security
+
+- Przypiecie wszystkich zewnetrznych GitHub Actions do pelnych commit SHA.
+- Wlaczenie GitHub Secret Scanning z push protection i aktualizacji bezpieczenstwa Dependabota.
+
 ## [0.1.0] - 2026-08-09
 
 ### Added

@@ -27,7 +27,17 @@ Workflow `Release`:
 - uruchamia testy na Pythonie 3.10, 3.12 i 3.14,
 - buduje oraz sprawdza wheel i sdist,
 - instaluje wheel w czystym srodowisku,
-- tworzy GitHub Release i dolacza oba pliki dystrybucji.
+- generuje CycloneDX SBOM i plik `SHA256SUMS`,
+- tworzy GitHub Artifact Attestation dla artefaktow,
+- tworzy GitHub Release i dolacza pliki dystrybucji, SBOM oraz sumy kontrolne.
+
+Po zakonczeniu workflow sprawdz attestation poleceniem:
+
+```bash
+VERSION=0.1.1
+gh attestation verify "dane_meteo_stacje-${VERSION}-py3-none-any.whl" \
+	--repo S3bx0/Dane-Meteo-Stacje
+```
 
 Nie wypychaj taga ponownie po nieudanym wydaniu. Popraw przyczyne, zwieksz wersje i utworz
 nowy tag. Publikacja do PyPI wymaga osobnej decyzji oraz konfiguracji trusted publishing.
