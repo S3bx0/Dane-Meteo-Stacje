@@ -177,6 +177,10 @@ CI uruchamia testy kompatybilnosci na Pythonie 3.10, 3.12 i 3.14. Buduje tez whe
 archiwum zrodlowe, sprawdza ich metadane i instaluje wheel w czystym srodowisku. Gotowe
 pliki sa dostepne w artefakcie `python-distributions` danego runu GitHub Actions.
 
+Wydania sa tworzone automatycznie po wypchnieciu taga `vX.Y.Z`, jezeli tag jest zgodny
+z wersja pakietu i wszystkie testy wydania przejda. Procedura znajduje sie w `RELEASING.md`,
+a historia zmian w `CHANGELOG.md`. Samo wypchniecie zmian na `main` nie publikuje wydania.
+
 ## Zrodla danych i noty
 
 - Projekt korzysta z danych stacji publikowanych przez NOAA/NCEI API.

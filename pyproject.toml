@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dane-meteo-stacje"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Narzędzie do wyszukiwania i opisu stacji meteorologicznych NOAA"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,6 +31,9 @@ dev = [
 [project.scripts]
 dane-meteo-stacje = "dane_meteo_stacje.cli:main"
 dane-meteo-stacje-gui = "dane_meteo_stacje.gui_bootstrap:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "dane_meteo_stacje.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
