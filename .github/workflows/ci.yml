@@ -100,7 +100,7 @@ jobs:
           /tmp/dane-meteo-stacje-smoke/bin/dane-meteo-stacje-gui --help
 
       - name: Upload distributions
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: python-distributions
           path: dist/
