@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import ipaddress
 import json
 import logging
 import os
+import socket
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from random import SystemRandom
 from typing import Any, TypedDict, cast
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from typing_extensions import NotRequired
@@ -19,6 +21,7 @@ from typing_extensions import NotRequired
 from .observability import log_event
 
 _RANDOM = SystemRandom()
+_MAX_REDIRECTS = 5
 
 
 class NoaaClientError(Exception):
@@ -39,6 +42,38 @@ class NoaaNetworkError(NoaaClientError):
 
 class NoaaPayloadError(NoaaClientError):
     """Remote API returned an invalid payload."""
+
+
+def _is_noaa_hostname(hostname: str) -> bool:
+    normalized = hostname.rstrip(".").lower()
+    return normalized == "noaa.gov" or normalized.endswith(".noaa.gov")
+
+
+def _validate_public_https_url(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise NoaaNetworkError("Remote URL is invalid") from exc
+
+    if parsed.scheme.lower() != "https":
+        raise NoaaNetworkError("Remote URL must use HTTPS")
+    if not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise NoaaNetworkError("Remote URL must contain a host without credentials")
+
+    try:
+        addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+        for *_, sockaddr in socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM):
+            raw_address = sockaddr[0]
+            if not isinstance(raw_address, str):
+                raise NoaaNetworkError("Remote URL resolved to an unsupported address")
+            addresses.add(ipaddress.ip_address(raw_address.split("%", 1)[0]))
+    except (OSError, ValueError) as exc:
+        raise NoaaNetworkError("Remote URL host could not be resolved") from exc
+
+    if not addresses or any(not address.is_global for address in addresses):
+        raise NoaaNetworkError("Remote URL must resolve only to public addresses")
+    return url
 
 
 @dataclass(frozen=True)
@@ -195,18 +230,25 @@ class NoaaClient:
         time.sleep(base + jitter)
 
     def fetch_json(self, url: str, token: str | None = None) -> tuple[Any, int, dict[str, str]]:
-        headers: dict[str, str] = {"User-Agent": self.user_agent}
-        if token:
-            # NOAA CDO uses the `token` header; Authorization is included for compatibility.
-            headers["token"] = token
-            headers["Authorization"] = f"Bearer {token}"
-
+        current_url = _validate_public_https_url(url)
         rate_retries_used = 0
         server_retries_used = 0
+        redirects_followed = 0
 
         while True:
+            headers: dict[str, str] = {"User-Agent": self.user_agent}
+            current_hostname = urlparse(current_url).hostname
+            if token and current_hostname and _is_noaa_hostname(current_hostname):
+                headers["token"] = token
+                headers["Authorization"] = f"Bearer {token}"
+
             try:
-                response = self._session.get(url, timeout=self.timeout, headers=headers)
+                response = self._session.get(
+                    current_url,
+                    timeout=self.timeout,
+                    headers=headers,
+                    allow_redirects=False,
+                )
             except requests.RequestException as exc:
                 if server_retries_used < self.max_retries_server_error:
                     self._sleep_with_backoff(server_retries_used)
@@ -215,6 +257,15 @@ class NoaaClient:
                 raise NoaaNetworkError(str(exc)) from exc
 
             status = response.status_code
+            if status in (301, 302, 303, 307, 308):
+                location = response.headers.get("Location")
+                if not location:
+                    raise NoaaNetworkError("Remote redirect is missing a Location header")
+                redirects_followed += 1
+                if redirects_followed > _MAX_REDIRECTS:
+                    raise NoaaNetworkError("Remote URL exceeded the redirect limit")
+                current_url = _validate_public_https_url(urljoin(current_url, location))
+                continue
             if status in (401, 403):
                 raise NoaaAuthError(f"HTTP {status}")
             if status == 429:

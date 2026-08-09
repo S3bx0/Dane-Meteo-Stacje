@@ -47,8 +47,9 @@ dane-meteo-stacje-gui --log-level DEBUG
 ```
 
 Ze wzgledow bezpieczenstwa pole `Remote URL` w GUI akceptuje wylacznie adresy HTTPS
-w domenie `noaa.gov`. Interfejs CLI nadal obsluguje zewnetrzne zrodla JSON podane przez
-`--remote-url`.
+w domenie `noaa.gov`. Interfejs CLI obsluguje tez zewnetrzne zrodla JSON podane przez
+`--remote-url`, ale wymaga HTTPS i publicznych adresow sieciowych. Kazde przekierowanie
+jest ponownie sprawdzane, a token NOAA nigdy nie jest wysylany poza domene `noaa.gov`.
 
 GUI zapisuje logi operacyjne jako pojedyncze obiekty JSON. Kazda odpowiedz API zawiera
 ten sam identyfikator korelacyjny w polu `request_id` i naglowku `X-Request-ID`, co pozwala

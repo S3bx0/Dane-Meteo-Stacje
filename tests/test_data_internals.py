@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import requests
 
+from dane_meteo_stacje import data
 from dane_meteo_stacje.data import (
     NoaaAuthError,
     NoaaClient,
@@ -35,12 +36,27 @@ class _DummyResponse:
 class _DummySession:
     def __init__(self, events):
         self._events = list(events)
+        self.calls = []
 
-    def get(self, url, timeout, headers):
+    def get(self, url, timeout, headers, allow_redirects=False):
+        self.calls.append({"url": url, "headers": headers, "allow_redirects": allow_redirects})
         event = self._events.pop(0)
         if isinstance(event, Exception):
             raise event
         return event
+
+
+@pytest.fixture(autouse=True)
+def public_dns(monkeypatch):
+    def resolve(host, port, type):
+        address = host if host == "127.0.0.1" else "93.184.216.34"
+        return [(data.socket.AF_INET, type, 6, "", (address, port))]
+
+    monkeypatch.setattr(
+        data.socket,
+        "getaddrinfo",
+        resolve,
+    )
 
 
 def test_noaa_client_retries_429_then_succeeds():
@@ -90,6 +106,61 @@ def test_noaa_client_raises_network_error_after_request_exception():
 
     with pytest.raises(NoaaNetworkError):
         client.fetch_json("https://example.invalid", token="t1")
+
+
+def test_noaa_client_rejects_non_https_url():
+    client = NoaaClient()
+
+    with pytest.raises(NoaaNetworkError, match="HTTPS"):
+        client.fetch_json("http://example.com/stations")
+
+
+def test_noaa_client_rejects_hostname_resolving_to_private_address(monkeypatch):
+    monkeypatch.setattr(
+        data.socket,
+        "getaddrinfo",
+        lambda host, port, type: [(data.socket.AF_INET, type, 6, "", ("127.0.0.1", port))],
+    )
+    client = NoaaClient()
+
+    with pytest.raises(NoaaNetworkError, match="public"):
+        client.fetch_json("https://internal.example/stations")
+
+
+def test_noaa_client_rejects_redirect_to_private_address():
+    client = NoaaClient()
+    client._session = _DummySession([_DummyResponse(302, headers={"Location": "https://127.0.0.1/admin"})])
+
+    with pytest.raises(NoaaNetworkError, match="public"):
+        client.fetch_json("https://example.invalid/stations")
+
+
+def test_noaa_client_does_not_send_noaa_token_to_external_host():
+    client = NoaaClient()
+    session = _DummySession([_DummyResponse(200, payload={"results": []})])
+    client._session = session
+
+    client.fetch_json("https://example.invalid/stations", token="secret-token")
+
+    assert "token" not in session.calls[0]["headers"]
+    assert "Authorization" not in session.calls[0]["headers"]
+
+
+def test_noaa_client_drops_token_when_noaa_redirects_to_external_host():
+    client = NoaaClient()
+    session = _DummySession(
+        [
+            _DummyResponse(302, headers={"Location": "https://example.invalid/stations"}),
+            _DummyResponse(200, payload={"results": []}),
+        ]
+    )
+    client._session = session
+
+    client.fetch_json("https://www.ncei.noaa.gov/stations", token="secret-token")
+
+    assert session.calls[0]["headers"]["token"] == "secret-token"
+    assert "token" not in session.calls[1]["headers"]
+    assert "Authorization" not in session.calls[1]["headers"]
 
 
 def test_extract_city_uses_location_and_coordinates_fallbacks():
