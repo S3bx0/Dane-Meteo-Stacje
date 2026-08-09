@@ -10,7 +10,7 @@ import webbrowser
 from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import BoundedSemaphore
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -41,12 +41,12 @@ def _resolve_gui_cache_path(value: object) -> Path | None:
     return None
 
   raw_name = str(value).strip()
-  candidate = Path(raw_name)
-  if candidate.is_absolute() or len(candidate.parts) != 1 or candidate.name != raw_name:
+  path_variants = (PurePosixPath(raw_name), PureWindowsPath(raw_name))
+  if any(path.is_absolute() or len(path.parts) != 1 or path.name != raw_name for path in path_variants):
     raise ValueError("cache_path must be a file name without directories")
-  if candidate.suffix.lower() != ".json":
+  if PurePosixPath(raw_name).suffix.lower() != ".json":
     raise ValueError("cache_path must use the .json extension")
-  return GUI_CACHE_DIR / candidate.name
+  return GUI_CACHE_DIR / raw_name
 
 
 class AppHTTPServer(ThreadingHTTPServer):

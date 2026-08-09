@@ -231,7 +231,10 @@ def test_search_confines_cache_file_to_gui_cache_directory(gui_server, monkeypat
     assert tmp_path.is_dir()
 
 
-@pytest.mark.parametrize("cache_path", ["../outside.json", "nested/cache.json", "C:\\outside.json", "notes.txt"])
+@pytest.mark.parametrize(
+    "cache_path",
+    ["../outside.json", "nested/cache.json", "C:\\outside.json", "C:outside.json", "notes.txt"],
+)
 def test_search_rejects_unsafe_cache_path(gui_server, monkeypatch, cache_path):
     fetch_called = False
 
