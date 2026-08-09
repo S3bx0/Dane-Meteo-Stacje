@@ -21,7 +21,14 @@ Obecnie repo zawiera przykładowe dane dla kilku stacji oraz obsługę danych ze
 ## Instalacja
 
 ```bash
+python -m pip install .
+```
+
+Do pracy nad kodem z zaleznosciami deweloperskimi:
+
+```bash
 python -m pip install -e .
+python -m pip install -e .[dev]
 ```
 
 ## Użycie
@@ -159,6 +166,10 @@ CI blokuje zmiany, ktore nie przechodza Ruff, mypy, testow z coverage co najmnie
 skanu kodu Bandit albo audytu zaleznosci pip-audit. Osobny workflow `NOAA Smoke`
 codziennie sprawdza rzeczywiste API NOAA z sekretem `NOAA_API_TOKENS`; mozna go tez
 uruchomic recznie w GitHub Actions.
+
+CI uruchamia testy kompatybilnosci na Pythonie 3.10, 3.12 i 3.14. Buduje tez wheel oraz
+archiwum zrodlowe, sprawdza ich metadane i instaluje wheel w czystym srodowisku. Gotowe
+pliki sa dostepne w artefakcie `python-distributions` danego runu GitHub Actions.
 
 ## Zrodla danych i noty
 

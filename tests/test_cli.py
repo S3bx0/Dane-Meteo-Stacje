@@ -6,7 +6,6 @@ import sys
 import time
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -115,7 +114,10 @@ def test_export_to_json_and_csv(tmp_path):
 
 def test_network_failures_use_cache_when_available(tmp_path):
     cache_file = tmp_path / "cache.json"
-    cache_file.write_text(json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]), encoding="utf-8")
+    cache_file.write_text(
+        json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]),
+        encoding="utf-8",
+    )
 
     result = subprocess.run(
         [
@@ -141,7 +143,10 @@ def test_network_failures_use_cache_when_available(tmp_path):
 
 def test_expired_cache_is_ignored_when_ttl_elapsed(tmp_path):
     cache_file = tmp_path / "cache.json"
-    cache_file.write_text(json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]), encoding="utf-8")
+    cache_file.write_text(
+        json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]),
+        encoding="utf-8",
+    )
     old_time = time.time() - 7200
     os.utime(cache_file, (old_time, old_time))
 
@@ -171,7 +176,10 @@ def test_expired_cache_is_ignored_when_ttl_elapsed(tmp_path):
 
 def test_refresh_flag_forces_remote_fetch_when_cache_exists(tmp_path):
     cache_file = tmp_path / "cache.json"
-    cache_file.write_text(json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]), encoding="utf-8")
+    cache_file.write_text(
+        json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]),
+        encoding="utf-8",
+    )
 
     result = subprocess.run(
         [
@@ -221,7 +229,10 @@ def test_remote_error_can_use_sample_fallback_when_enabled(tmp_path):
 
 def test_stale_cache_can_be_used_when_remote_fails_and_flag_enabled(tmp_path):
     cache_file = tmp_path / "cache.json"
-    cache_file.write_text(json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]), encoding="utf-8")
+    cache_file.write_text(
+        json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]),
+        encoding="utf-8",
+    )
     old_time = time.time() - 7200
     os.utime(cache_file, (old_time, old_time))
 
@@ -253,7 +264,10 @@ def test_stale_cache_can_be_used_when_remote_fails_and_flag_enabled(tmp_path):
 
 def test_stale_cache_respects_max_stale_limit(tmp_path):
     cache_file = tmp_path / "cache.json"
-    cache_file.write_text(json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]), encoding="utf-8")
+    cache_file.write_text(
+        json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]),
+        encoding="utf-8",
+    )
     old_time = time.time() - 7200
     os.utime(cache_file, (old_time, old_time))
 
@@ -345,7 +359,6 @@ def test_noaa_payload_is_mapped_to_station_dict():
                 "maxdate": "2025-12-31",
                 "datatype": ["TMAX", "TMIN"],
                 "datacoverage": 1.0,
-                "id": "USW00014898",
             }
         ]
     }
@@ -358,7 +371,10 @@ def test_noaa_payload_is_mapped_to_station_dict():
 
 def test_cache_metadata_command_shows_timestamp_and_count(tmp_path):
     cache_file = tmp_path / "cache.json"
-    cache_file.write_text(json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]), encoding="utf-8")
+    cache_file.write_text(
+        json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland"}]),
+        encoding="utf-8",
+    )
     metadata_path = tmp_path / "cache.json.meta.json"
     metadata_path.write_text(json.dumps({"timestamp": 1234567890, "count": 1}), encoding="utf-8")
 
@@ -377,7 +393,20 @@ def test_cache_metadata_command_shows_timestamp_and_count(tmp_path):
 
 def test_search_results_include_source_hint_when_requested(tmp_path):
     cache_file = tmp_path / "cache.json"
-    cache_file.write_text(json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland", "source": "cache"}]), encoding="utf-8")
+    cache_file.write_text(
+        json.dumps(
+            [
+                {
+                    "station_id": "CACHE1",
+                    "city": "Cache City",
+                    "name": "Cache City",
+                    "country": "Poland",
+                    "source": "cache",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
     metadata_path = tmp_path / "cache.json.meta.json"
     metadata_path.write_text(json.dumps({"timestamp": 1234567890, "count": 1}), encoding="utf-8")
 
@@ -469,7 +498,17 @@ def test_search_can_filter_by_country(tmp_path):
     )
 
     result = subprocess.run(
-        [sys.executable, "-m", "dane_meteo_stacje", "search", "test", "--source", str(custom_source), "--country", "Poland"],
+        [
+            sys.executable,
+            "-m",
+            "dane_meteo_stacje",
+            "search",
+            "test",
+            "--source",
+            str(custom_source),
+            "--country",
+            "Poland",
+        ],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -508,7 +547,20 @@ def test_search_results_are_sorted_by_city(tmp_path):
 
 def test_show_source_output_is_more_readable(tmp_path):
     cache_file = tmp_path / "cache.json"
-    cache_file.write_text(json.dumps([{"station_id": "CACHE1", "city": "Cache City", "name": "Cache City", "country": "Poland", "source": "cache"}]), encoding="utf-8")
+    cache_file.write_text(
+        json.dumps(
+            [
+                {
+                    "station_id": "CACHE1",
+                    "city": "Cache City",
+                    "name": "Cache City",
+                    "country": "Poland",
+                    "source": "cache",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
     metadata_path = tmp_path / "cache.json.meta.json"
     metadata_path.write_text(json.dumps({"timestamp": 1234567890, "count": 1}), encoding="utf-8")
 
@@ -538,7 +590,17 @@ def test_search_can_filter_by_station_id(tmp_path):
     )
 
     result = subprocess.run(
-        [sys.executable, "-m", "dane_meteo_stacje", "search", "test", "--source", str(custom_source), "--station-id", "DE1"],
+        [
+            sys.executable,
+            "-m",
+            "dane_meteo_stacje",
+            "search",
+            "test",
+            "--source",
+            str(custom_source),
+            "--station-id",
+            "DE1",
+        ],
         cwd=ROOT,
         capture_output=True,
         text=True,

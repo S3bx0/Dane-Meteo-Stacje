@@ -72,7 +72,7 @@ def test_fetch_remote_stations_rotates_token_on_rate_limit():
 
     assert [station["station_id"] for station in stations] == ["T1"]
     assert fake_client.calls == ["bad", "good"]
-    assert metadata["token_fingerprint"] == hashlib.sha256("good".encode("utf-8")).hexdigest()[:10]
+    assert metadata["token_fingerprint"] == hashlib.sha256(b"good").hexdigest()[:10]
 
 
 def test_fetch_remote_stations_rotates_token_on_auth_error():
@@ -87,7 +87,7 @@ def test_fetch_remote_stations_rotates_token_on_auth_error():
 
     assert [station["station_id"] for station in stations] == ["T1"]
     assert fake_client.calls == ["expired", "fresh"]
-    assert metadata["token_fingerprint"] == hashlib.sha256("fresh".encode("utf-8")).hexdigest()[:10]
+    assert metadata["token_fingerprint"] == hashlib.sha256(b"fresh").hexdigest()[:10]
 
 
 def test_fetch_remote_stations_fails_when_all_tokens_unhealthy():
