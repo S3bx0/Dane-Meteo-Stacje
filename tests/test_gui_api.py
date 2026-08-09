@@ -214,6 +214,41 @@ def test_search_validates_numeric_options(gui_server):
     assert json.loads(body)["code"] == "BAD_REQUEST"
 
 
+def test_search_confines_cache_file_to_gui_cache_directory(gui_server, monkeypatch, tmp_path):
+    captured = {}
+
+    def capture_fetch(**kwargs):
+        captured.update(kwargs)
+        return FetchResult(stations=[], source="sample-default", metadata={})
+
+    monkeypatch.setattr(gui, "GUI_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gui, "fetch_stations_with_cache_details", capture_fetch)
+
+    status, _, _ = _request(gui_server, "POST", "/api/search", {"cache_path": "stations.json"})
+
+    assert status == 200
+    assert captured["cache_path"] == tmp_path / "stations.json"
+    assert tmp_path.is_dir()
+
+
+@pytest.mark.parametrize("cache_path", ["../outside.json", "nested/cache.json", "C:\\outside.json", "notes.txt"])
+def test_search_rejects_unsafe_cache_path(gui_server, monkeypatch, cache_path):
+    fetch_called = False
+
+    def capture_fetch(**kwargs):
+        nonlocal fetch_called
+        fetch_called = True
+        return FetchResult(stations=[], source="sample-default", metadata={})
+
+    monkeypatch.setattr(gui, "fetch_stations_with_cache_details", capture_fetch)
+
+    status, _, body = _request(gui_server, "POST", "/api/search", {"cache_path": cache_path})
+
+    assert status == 400
+    assert json.loads(body)["code"] == "BAD_REQUEST"
+    assert fetch_called is False
+
+
 def test_search_maps_noaa_errors(gui_server, monkeypatch):
     def fail_fetch(**kwargs):
         raise NoaaNetworkError("offline")

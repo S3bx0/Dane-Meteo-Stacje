@@ -50,6 +50,9 @@ Ze wzgledow bezpieczenstwa pole `Remote URL` w GUI akceptuje wylacznie adresy HT
 w domenie `noaa.gov`. Interfejs CLI obsluguje tez zewnetrzne zrodla JSON podane przez
 `--remote-url`, ale wymaga HTTPS i publicznych adresow sieciowych. Kazde przekierowanie
 jest ponownie sprawdzane, a token NOAA nigdy nie jest wysylany poza domene `noaa.gov`.
+Pole `Cache File` w GUI przyjmuje tylko nazwe pliku z rozszerzeniem `.json`; plik jest
+przechowywany w `~/.cache/dane-meteo-stacje`. CLI nadal pozwala jawnie wskazac lokalna
+sciezke cache argumentem `--cache`.
 
 GUI zapisuje logi operacyjne jako pojedyncze obiekty JSON. Kazda odpowiedz API zawiera
 ten sam identyfikator korelacyjny w polu `request_id` i naglowku `X-Request-ID`, co pozwala

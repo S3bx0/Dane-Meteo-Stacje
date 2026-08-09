@@ -16,6 +16,7 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
 - Wlaczenie GitHub Secret Scanning z push protection i aktualizacji bezpieczenstwa Dependabota.
 - Blokada SSRF przez wymuszenie publicznych adresow HTTPS i walidacje kazdego przekierowania.
 - Ograniczenie naglowkow z tokenem NOAA wylacznie do hostow w domenie `noaa.gov`.
+- Ograniczenie plikow cache wskazywanych przez GUI do dedykowanego katalogu aplikacji.
 
 ## [0.1.0] - 2026-08-09
 

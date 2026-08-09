@@ -10,6 +10,7 @@ import webbrowser
 from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from threading import BoundedSemaphore
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -23,6 +24,7 @@ from .observability import bind_request_id, configure_logging, log_event, reset_
 MAX_REQUEST_BODY_BYTES = 256 * 1024
 MAX_CONCURRENT_FETCHES = 4
 FETCH_SLOT_TIMEOUT_SECONDS = 0.1
+GUI_CACHE_DIR = Path.home() / ".cache" / "dane-meteo-stacje"
 _FETCH_LIMITER = BoundedSemaphore(MAX_CONCURRENT_FETCHES)
 
 
@@ -32,6 +34,19 @@ class InvalidRequestBody(ValueError):
 
 class RequestBodyTooLarge(ValueError):
     pass
+
+
+def _resolve_gui_cache_path(value: object) -> Path | None:
+  if value is None or not str(value).strip():
+    return None
+
+  raw_name = str(value).strip()
+  candidate = Path(raw_name)
+  if candidate.is_absolute() or len(candidate.parts) != 1 or candidate.name != raw_name:
+    raise ValueError("cache_path must be a file name without directories")
+  if candidate.suffix.lower() != ".json":
+    raise ValueError("cache_path must use the .json extension")
+  return GUI_CACHE_DIR / candidate.name
 
 
 class AppHTTPServer(ThreadingHTTPServer):
@@ -98,7 +113,7 @@ HTML_PAGE = """<!doctype html>
             <div class="form-text">Example: FIPS:PL (Poland), FIPS:HU (Hungary), FIPS:SP (Spain).</div>
           </div>
           <div class="col-md-3">
-            <label class="form-label">Cache Path</label>
+            <label class="form-label">Cache File</label>
             <input id="cache-path" class="form-control mono" placeholder="cache.json" />
           </div>
           <div class="col-md-2">
@@ -711,7 +726,14 @@ class AppHandler(BaseHTTPRequestHandler):
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
-        cache_path = payload.get("cache_path")
+        try:
+            cache_path = _resolve_gui_cache_path(payload.get("cache_path"))
+        except ValueError as exc:
+            self._send_json(
+                {"code": "BAD_REQUEST", "message": str(exc)},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
         country = payload.get("country")
         station_id = payload.get("station_id")
         sort_by = str(payload.get("sort", "city"))
@@ -731,8 +753,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
         try:
             try:
+                if cache_path is not None:
+                    GUI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 result = fetch_stations_with_cache_details(
-                    cache_path=str(cache_path) if cache_path else None,
+                    cache_path=cache_path,
                     remote_url=str(remote_url) if remote_url else None,
                     cache_ttl=cache_ttl,
                     refresh=bool(payload.get("refresh", False)),
