@@ -10,6 +10,7 @@ import webbrowser
 from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import BoundedSemaphore
 from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -20,6 +21,9 @@ from .diagnostics import fetch_error_code, render_fetch_error
 from .observability import bind_request_id, configure_logging, log_event, reset_request_id
 
 MAX_REQUEST_BODY_BYTES = 256 * 1024
+MAX_CONCURRENT_FETCHES = 4
+FETCH_SLOT_TIMEOUT_SECONDS = 0.1
+_FETCH_LIMITER = BoundedSemaphore(MAX_CONCURRENT_FETCHES)
 
 
 class InvalidRequestBody(ValueError):
@@ -28,6 +32,11 @@ class InvalidRequestBody(ValueError):
 
 class RequestBodyTooLarge(ValueError):
     pass
+
+
+class AppHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
 
 
 HTML_PAGE = """<!doctype html>
@@ -707,16 +716,33 @@ class AppHandler(BaseHTTPRequestHandler):
         station_id = payload.get("station_id")
         sort_by = str(payload.get("sort", "city"))
 
-        try:
-            result = fetch_stations_with_cache_details(
-                cache_path=str(cache_path) if cache_path else None,
-                remote_url=str(remote_url) if remote_url else None,
-                cache_ttl=cache_ttl,
-                refresh=bool(payload.get("refresh", False)),
-                allow_sample_fallback=bool(payload.get("allow_sample_fallback", False)),
-                stale_if_error=bool(payload.get("stale_if_error", False)),
-                max_stale_seconds=max_stale,
+        if not _FETCH_LIMITER.acquire(timeout=FETCH_SLOT_TIMEOUT_SECONDS):
+            log_event(
+                "station_fetch_rejected",
+                level=logging.WARNING,
+                reason="concurrency_limit",
+                limit=MAX_CONCURRENT_FETCHES,
             )
+            self._send_json(
+                {"code": "SERVER_BUSY", "message": "Server is busy; retry shortly"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+
+        try:
+            try:
+                result = fetch_stations_with_cache_details(
+                    cache_path=str(cache_path) if cache_path else None,
+                    remote_url=str(remote_url) if remote_url else None,
+                    cache_ttl=cache_ttl,
+                    refresh=bool(payload.get("refresh", False)),
+                    allow_sample_fallback=bool(payload.get("allow_sample_fallback", False)),
+                    stale_if_error=bool(payload.get("stale_if_error", False)),
+                    max_stale_seconds=max_stale,
+                )
+            finally:
+                _FETCH_LIMITER.release()
+
             normalized_country = str(country).strip() if country else None
             normalized_station_id = str(station_id).strip() if station_id else None
 
@@ -847,7 +873,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
 
 def run_server(host: str, port: int, *, open_browser: bool = True) -> None:
-    server = ThreadingHTTPServer((host, port), AppHandler)
+    server = AppHTTPServer((host, port), AppHandler)
     url = f"http://{host}:{port}"
     print(f"GUI is running at {url}")
     print("Press Ctrl+C to stop.")

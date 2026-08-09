@@ -8,9 +8,9 @@ from dane_meteo_stacje.gui_bootstrap import (
     HTML_PAGE,
     MAX_REQUEST_BODY_BYTES,
     AppHandler,
+    AppHTTPServer,
     InvalidRequestBody,
     RequestBodyTooLarge,
-    ThreadingHTTPServer,
     _parse_content_length,
     _validate_remote_url,
 )
@@ -18,7 +18,7 @@ from dane_meteo_stacje.gui_bootstrap import (
 
 @pytest.fixture
 def gui_server():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), AppHandler)
+    server = AppHTTPServer(("127.0.0.1", 0), AppHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

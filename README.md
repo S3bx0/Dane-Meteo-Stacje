@@ -56,6 +56,10 @@ powiazac blad widoczny w kliencie z logami serwera. Nieoczekiwany blad zwraca be
 kod `INTERNAL_ERROR`, a szczegoly i traceback pozostaja w logach serwera. Log zakonczenia
 zadania zawiera czas obslugi `duration_ms`. Tokeny NOAA nie sa logowane.
 
+Serwer dopuszcza maksymalnie cztery rownolegle operacje pobierania stacji. Kolejne zadanie
+otrzymuje `503 SERVER_BUSY` i moze zostac ponowione; `/health` oraz eksport nie sa blokowane
+przez ten limit. Watki obslugi polaczen nie blokuja zatrzymania procesu serwera.
+
 ### Wyszukiwanie stacji
 
 ```bash

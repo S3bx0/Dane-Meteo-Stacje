@@ -3,6 +3,7 @@ import io
 import json
 import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
@@ -14,7 +15,7 @@ from dane_meteo_stacje.observability import configure_logging, log_event
 
 @pytest.fixture
 def gui_server() -> Iterator[tuple[str, int]]:
-    server = gui.ThreadingHTTPServer(("127.0.0.1", 0), gui.AppHandler)
+    server = gui.AppHTTPServer(("127.0.0.1", 0), gui.AppHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -36,7 +37,7 @@ def _request(
 ) -> tuple[int, dict[str, str], bytes]:
     body = raw_body if raw_body is not None else (json.dumps(payload).encode("utf-8") if payload is not None else None)
     headers = {"Content-Type": "application/json"} if body is not None else {}
-    connection = http.client.HTTPConnection(*address)
+    connection = http.client.HTTPConnection(*address, timeout=2)
     connection.request(method, path, body=body, headers=headers)
     response = connection.getresponse()
     response_body = response.read()
@@ -73,6 +74,80 @@ def test_get_routes(gui_server):
     status, _, body = _request(gui_server, "GET", "/missing")
     assert status == 404
     assert json.loads(body)["code"] == "NOT_FOUND"
+
+
+def test_concurrent_health_requests_have_unique_correlated_request_ids(gui_server):
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        responses = list(executor.map(lambda _: _request(gui_server, "GET", "/health"), range(20)))
+
+    request_ids = []
+    for status, headers, body in responses:
+        payload = json.loads(body)
+        assert status == 200
+        assert payload["ok"] is True
+        assert headers["x-request-id"] == payload["request_id"]
+        request_ids.append(payload["request_id"])
+
+    assert len(set(request_ids)) == 20
+
+
+def test_fetch_concurrency_limit_returns_503_without_blocking_health(gui_server, monkeypatch):
+    limiter = threading.BoundedSemaphore(gui.MAX_CONCURRENT_FETCHES)
+    all_fetches_started = threading.Event()
+    release_fetches = threading.Event()
+    state_lock = threading.Lock()
+    active_fetches = 0
+    peak_fetches = 0
+
+    def blocking_fetch(**kwargs):
+        nonlocal active_fetches, peak_fetches
+        with state_lock:
+            active_fetches += 1
+            peak_fetches = max(peak_fetches, active_fetches)
+            if active_fetches == gui.MAX_CONCURRENT_FETCHES:
+                all_fetches_started.set()
+        try:
+            release_fetches.wait(timeout=2)
+            return FetchResult(stations=[_station("PL1", "Warsaw")], source="remote", metadata={})
+        finally:
+            with state_lock:
+                active_fetches -= 1
+
+    monkeypatch.setattr(gui, "_FETCH_LIMITER", limiter)
+    monkeypatch.setattr(gui, "fetch_stations_with_cache_details", blocking_fetch)
+
+    with ThreadPoolExecutor(max_workers=gui.MAX_CONCURRENT_FETCHES) as executor:
+        requests = [
+            executor.submit(_request, gui_server, "POST", "/api/search", {})
+            for _ in range(gui.MAX_CONCURRENT_FETCHES)
+        ]
+        try:
+            assert all_fetches_started.wait(timeout=1)
+
+            busy_status, busy_headers, busy_body = _request(gui_server, "POST", "/api/search", {})
+            busy_payload = json.loads(busy_body)
+            health_status, _, health_body = _request(gui_server, "GET", "/health")
+
+            assert busy_status == 503
+            assert busy_payload["code"] == "SERVER_BUSY"
+            assert busy_headers["x-request-id"] == busy_payload["request_id"]
+            assert health_status == 200
+            assert json.loads(health_body)["ok"] is True
+            assert peak_fetches == gui.MAX_CONCURRENT_FETCHES
+        finally:
+            release_fetches.set()
+
+        assert all(request.result()[0] == 200 for request in requests)
+
+    acquired_slots = [limiter.acquire(blocking=False) for _ in range(gui.MAX_CONCURRENT_FETCHES)]
+    assert all(acquired_slots)
+    for _ in acquired_slots:
+        limiter.release()
+
+
+def test_app_http_server_uses_daemon_request_threads():
+    assert gui.AppHTTPServer.daemon_threads is True
+    assert gui.AppHTTPServer.allow_reuse_address is True
 
 
 def test_post_rejects_unknown_route_and_invalid_json(gui_server):
