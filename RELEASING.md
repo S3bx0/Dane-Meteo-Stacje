@@ -8,7 +8,7 @@ Workflow nie publikuje pakietu do PyPI.
 1. Upewnij sie, ze `main` jest czysty i zsynchronizowany z `origin/main`.
 2. Zaktualizuj `dane_meteo_stacje.__version__` zgodnie z Semantic Versioning.
 3. Przenies zmiany z sekcji `Unreleased` w `CHANGELOG.md` do nowej wersji i daty.
-4. Uruchom lokalnie Ruff, mypy, Bandit, pip-audit oraz pytest z coverage 90%.
+4. Uruchom lokalnie Ruff, mypy, Bandit, pip-audit oraz pytest z coverage 93%.
 5. Zbuduj paczki przez `python -m build` i sprawdz je przez `python -m twine check dist/*`.
 6. Commituj przygotowanie wydania i poczekaj na zielone CI na `main`.
 
@@ -17,8 +17,8 @@ Workflow nie publikuje pakietu do PyPI.
 Utworzenie i wypchniecie taga jest operacja publikujaca:
 
 ```bash
-git tag -a v0.1.0 -m "Release v0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "Release v0.1.1"
+git push origin v0.1.1
 ```
 
 Workflow `Release`:

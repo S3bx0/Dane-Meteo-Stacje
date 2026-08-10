@@ -5,8 +5,11 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-10
+
 ### Added
 
+- Governance repozytorium: CODEOWNERS, formularze zgloszen, checklista pull requestow i polityka bezpieczenstwa.
 - CycloneDX SBOM, sumy SHA-256 i GitHub Artifact Attestation dla nowych wydan.
 - Analiza CodeQL dla kodu Pythona na `main`, w pull requestach i co tydzien.
 - Kontrakty odpowiedzi API z correlation ID oraz testy poprawnego zamykania serwera.
@@ -25,6 +28,7 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
 - Blokada SSRF przez wymuszenie publicznych adresow HTTPS i walidacje kazdego przekierowania.
 - Ograniczenie naglowkow z tokenem NOAA wylacznie do hostow w domenie `noaa.gov`.
 - Ograniczenie plikow cache wskazywanych przez GUI do dedykowanego katalogu aplikacji.
+- Testy kompatybilnosci workflow wydania instaluja zaleznosci Hypothesis i OpenAPI oraz pomijaja osobny zestaw E2E.
 
 ## [0.1.0] - 2026-08-09
 
@@ -47,5 +51,6 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
 - Renderowanie danych tabeli przez `textContent` zamiast `innerHTML`.
 - Tokeny NOAA i szczegoly wyjatkow nie sa zwracane klientowi ani logowane.
 
-[Unreleased]: https://github.com/S3bx0/Dane-Meteo-Stacje/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/S3bx0/Dane-Meteo-Stacje/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/S3bx0/Dane-Meteo-Stacje/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/S3bx0/Dane-Meteo-Stacje/releases/tag/v0.1.0
