@@ -6,6 +6,7 @@ from .data import (
     NoaaNetworkError,
     NoaaPayloadError,
     NoaaRateLimitError,
+    NoaaTimeoutError,
 )
 
 
@@ -16,6 +17,8 @@ def render_fetch_error(exc: NoaaClientError) -> str:
         return "NOAA rate limit: przekroczono limit zapytań (HTTP 429)."
     if isinstance(exc, NoaaPayloadError):
         return "NOAA payload error: nieobsługiwany format odpowiedzi NOAA."
+    if isinstance(exc, NoaaTimeoutError):
+        return "NOAA timeout: przekroczono limit czasu pobierania danych."
     if isinstance(exc, NoaaNetworkError):
         return "NOAA network error: nie udało się pobrać danych z NOAA."
     return "NOAA error: nie udało się pobrać danych."
@@ -28,6 +31,8 @@ def fetch_error_code(exc: NoaaClientError) -> str:
         return "NOAA_RATE_LIMIT"
     if isinstance(exc, NoaaPayloadError):
         return "NOAA_PAYLOAD"
+    if isinstance(exc, NoaaTimeoutError):
+        return "NOAA_TIMEOUT"
     if isinstance(exc, NoaaNetworkError):
         return "NOAA_NETWORK"
     return "NOAA_UNKNOWN"

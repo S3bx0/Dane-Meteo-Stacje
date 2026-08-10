@@ -9,7 +9,8 @@ from typing import Any
 import pytest
 
 import dane_meteo_stacje.gui_bootstrap as gui
-from dane_meteo_stacje.data import FetchResult, NoaaNetworkError
+from dane_meteo_stacje.data import FetchResult, NoaaNetworkError, NoaaTimeoutError
+from dane_meteo_stacje.metrics import MetricsRegistry
 from dane_meteo_stacje.observability import configure_logging, log_event
 
 
@@ -82,17 +83,45 @@ def test_get_routes(gui_server):
     assert status == 200
     assert headers["content-type"] == "text/html; charset=utf-8"
     assert b"Dane Meteo Stacje" in body
+    assert "unsafe-inline" not in headers["content-security-policy"].split("script-src", 1)[1].split(";", 1)[0]
+    csp_nonce = headers["content-security-policy"].split("script-src 'nonce-", 1)[1].split("'", 1)[0]
+    assert f'<script nonce="{csp_nonce}">'.encode() in body
 
     status, headers, body = _request(gui_server, "GET", "/health")
     payload = json.loads(body)
     assert status == 200
     assert payload["ok"] is True
+    assert payload["status"] == "alive"
     assert len(payload["request_id"]) == 32
     assert headers["x-request-id"] == payload["request_id"]
 
     status, _, body = _request(gui_server, "GET", "/missing")
     assert status == 404
     assert json.loads(body)["code"] == "NOT_FOUND"
+
+
+def test_operability_routes_expose_contract_health_and_metrics(gui_server, monkeypatch):
+    registry = MetricsRegistry()
+    monkeypatch.setattr(gui, "_METRICS", registry)
+
+    live_status, live_headers, live_body = _request(gui_server, "GET", "/health/live")
+    ready_status, _, ready_body = _request(gui_server, "GET", "/health/ready")
+    contract_status, _, contract_body = _request(gui_server, "GET", "/openapi.json")
+    metrics_status, metrics_headers, metrics_body = _request(gui_server, "GET", "/metrics")
+
+    assert live_status == ready_status == contract_status == metrics_status == 200
+    assert json.loads(live_body)["status"] == "alive"
+    ready = json.loads(ready_body)
+    assert ready["status"] == "ready"
+    assert ready["checks"]["noaa"] == "request-scoped"
+    contract = json.loads(contract_body)
+    assert contract["openapi"] == "3.1.0"
+    assert "request_id" not in contract
+    assert metrics_headers["content-type"] == "text/plain; version=0.0.4; charset=utf-8"
+    assert b'dane_meteo_requests_total{method="GET",path="/health/live",status="200"} 1' in metrics_body
+    assert live_headers["x-content-type-options"] == "nosniff"
+    assert live_headers["referrer-policy"] == "no-referrer"
+    assert live_headers["cache-control"] == "no-store"
 
 
 def test_endpoint_json_contracts(gui_server, monkeypatch):
@@ -325,6 +354,22 @@ def test_search_maps_noaa_errors(gui_server, monkeypatch):
 
     assert status == 502
     assert json.loads(body)["code"] == "NOAA_NETWORK"
+
+
+def test_search_maps_noaa_deadline_to_504_and_passes_budget(gui_server, monkeypatch):
+    captured = {}
+
+    def timeout_fetch(**kwargs):
+        captured.update(kwargs)
+        raise NoaaTimeoutError("deadline")
+
+    monkeypatch.setattr(gui, "fetch_stations_with_cache_details", timeout_fetch)
+    status, headers, body = _request(gui_server, "POST", "/api/search", {})
+    payload = _assert_json_contract(headers, body, error_code="NOAA_TIMEOUT")
+
+    assert status == 504
+    assert captured["remote_timeout_seconds"] == gui.REMOTE_REQUEST_DEADLINE_SECONDS
+    assert "deadline" not in payload["message"]
 
 
 def test_unexpected_error_returns_safe_correlated_500_and_logs_traceback(gui_server, monkeypatch):

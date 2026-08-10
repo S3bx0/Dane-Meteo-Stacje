@@ -38,7 +38,7 @@ def _write_cache(cache_file: Path, stations: list[dict], *, fetched_at: int, sou
 def test_cache_metadata_contains_remote_http_fields(tmp_path, monkeypatch):
     cache_file = tmp_path / "cache.json"
 
-    def fake_fetch_remote_stations(remote, token=None, token_provider=None):
+    def fake_fetch_remote_stations(remote, timeout=10, token=None, token_provider=None):
         return [
             {
                 "station_id": "R1",
@@ -78,7 +78,7 @@ def test_fresh_cache_is_not_used_when_source_url_differs(tmp_path, monkeypatch):
         source_url="https://old.example.com/stations",
     )
 
-    def fake_fetch_remote_stations(remote, token=None, token_provider=None):
+    def fake_fetch_remote_stations(remote, timeout=10, token=None, token_provider=None):
         return [
             {
                 "station_id": "R2",
@@ -116,7 +116,7 @@ def test_stale_if_error_returns_cache_with_age_and_warning(tmp_path, monkeypatch
         source_url="https://example.com/stations",
     )
 
-    def fake_fetch_remote_stations(remote, token=None, token_provider=None):
+    def fake_fetch_remote_stations(remote, timeout=10, token=None, token_provider=None):
         raise NoaaNetworkError("HTTP 503")
 
     monkeypatch.setattr(data, "fetch_remote_stations", fake_fetch_remote_stations)
@@ -164,7 +164,7 @@ def test_stale_cache_raises_when_older_than_max_stale(tmp_path, monkeypatch):
         source_url="https://example.com/stations",
     )
 
-    def fake_fetch_remote_stations(remote, token=None, token_provider=None):
+    def fake_fetch_remote_stations(remote, timeout=10, token=None, token_provider=None):
         raise NoaaNetworkError("HTTP 503")
 
     monkeypatch.setattr(data, "fetch_remote_stations", fake_fetch_remote_stations)

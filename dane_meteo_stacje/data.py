@@ -40,6 +40,10 @@ class NoaaNetworkError(NoaaClientError):
     """Remote API is unavailable or request failed."""
 
 
+class NoaaTimeoutError(NoaaNetworkError):
+    """Remote API did not complete within the request deadline."""
+
+
 class NoaaPayloadError(NoaaClientError):
     """Remote API returned an invalid payload."""
 
@@ -209,7 +213,7 @@ STATIONS: list[StationRecord] = [
 class NoaaClient:
     def __init__(
         self,
-        timeout: int = 10,
+        timeout: float = 10,
         max_retries_rate_limit: int = 2,
         max_retries_server_error: int = 2,
         backoff_seconds: float = 0.25,
@@ -224,18 +228,26 @@ class NoaaClient:
         self.user_agent = user_agent
         self._session = requests.Session()
 
-    def _sleep_with_backoff(self, attempt: int) -> None:
+    def _sleep_with_backoff(self, attempt: int, deadline: float) -> None:
         base = self.backoff_seconds * (2**attempt)
         jitter = _RANDOM.uniform(0, self.jitter_seconds) if self.jitter_seconds > 0 else 0.0
-        time.sleep(base + jitter)
+        delay = base + jitter
+        remaining = deadline - time.monotonic()
+        if remaining <= delay:
+            raise NoaaTimeoutError("Remote request deadline exceeded")
+        time.sleep(delay)
 
     def fetch_json(self, url: str, token: str | None = None) -> tuple[Any, int, dict[str, str]]:
         current_url = _validate_public_https_url(url)
+        deadline = time.monotonic() + self.timeout
         rate_retries_used = 0
         server_retries_used = 0
         redirects_followed = 0
 
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise NoaaTimeoutError("Remote request deadline exceeded")
             headers: dict[str, str] = {"User-Agent": self.user_agent}
             current_hostname = urlparse(current_url).hostname
             if token and current_hostname and _is_noaa_hostname(current_hostname):
@@ -245,13 +257,19 @@ class NoaaClient:
             try:
                 response = self._session.get(
                     current_url,
-                    timeout=self.timeout,
+                    timeout=max(min(self.timeout, remaining), 0.001),
                     headers=headers,
                     allow_redirects=False,
                 )
+            except requests.Timeout as exc:
+                if server_retries_used < self.max_retries_server_error:
+                    self._sleep_with_backoff(server_retries_used, deadline)
+                    server_retries_used += 1
+                    continue
+                raise NoaaTimeoutError("Remote request deadline exceeded") from exc
             except requests.RequestException as exc:
                 if server_retries_used < self.max_retries_server_error:
-                    self._sleep_with_backoff(server_retries_used)
+                    self._sleep_with_backoff(server_retries_used, deadline)
                     server_retries_used += 1
                     continue
                 raise NoaaNetworkError(str(exc)) from exc
@@ -270,13 +288,13 @@ class NoaaClient:
                 raise NoaaAuthError(f"HTTP {status}")
             if status == 429:
                 if rate_retries_used < self.max_retries_rate_limit:
-                    self._sleep_with_backoff(rate_retries_used)
+                    self._sleep_with_backoff(rate_retries_used, deadline)
                     rate_retries_used += 1
                     continue
                 raise NoaaRateLimitError("HTTP 429")
             if status >= 500:
                 if server_retries_used < self.max_retries_server_error:
-                    self._sleep_with_backoff(server_retries_used)
+                    self._sleep_with_backoff(server_retries_used, deadline)
                     server_retries_used += 1
                     continue
                 raise NoaaNetworkError(f"HTTP {status}")
@@ -504,7 +522,7 @@ def load_stations(source: str | Path | None = None) -> list[StationRecord]:
 
 def fetch_remote_stations(
     url: str,
-    timeout: int = 10,
+    timeout: float = 10,
     token: str | None = None,
     client: NoaaClient | None = None,
     token_provider: TokenProvider | None = None,
@@ -672,6 +690,7 @@ def fetch_stations_with_cache_details(
     max_stale_seconds: int | None = None,
     token: str | None = None,
     token_provider: TokenProvider | None = None,
+    remote_timeout_seconds: float = 10,
 ) -> FetchResult:
     cache_file: Path | None = Path(cache_path) if cache_path is not None else None
     remote = remote_url or os.getenv("NOAA_STATIONS_URL")
@@ -716,6 +735,7 @@ def fetch_stations_with_cache_details(
         try:
             fetched, remote_meta = fetch_remote_stations(
                 remote,
+                timeout=remote_timeout_seconds,
                 token=remote_token,
                 token_provider=provider,
             )

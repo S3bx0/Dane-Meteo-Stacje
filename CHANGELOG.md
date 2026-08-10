@@ -13,6 +13,10 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
 - Testy wlasnosciowe Hypothesis dla normalizacji, wyszukiwania i serializacji danych.
 - Scenariusze E2E interfejsu w Chromium przez Playwright, uruchamiane w osobnym zadaniu CI.
 - Podniesienie wymaganej wartosci coverage z 90% do 93%.
+- Wersjonowany kontrakt OpenAPI 3.1 oraz osobne endpointy liveness i readiness.
+- Metryki Prometheus dla requestow, bledow, fallbackow, przeciazenia i czasu odpowiedzi.
+- Laczny deadline pobierania NOAA z kontrolowana odpowiedzia `504 NOAA_TIMEOUT`.
+- Naglowki CSP, `X-Content-Type-Options`, `Referrer-Policy` i `Permissions-Policy` dla HTTP.
 
 ### Security
 

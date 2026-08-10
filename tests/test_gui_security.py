@@ -102,3 +102,23 @@ def test_search_endpoint_rejects_oversized_body(gui_server):
 
     assert response.status == 413
     assert payload["code"] == "PAYLOAD_TOO_LARGE"
+
+
+def test_all_response_types_include_security_headers(gui_server):
+    host, port = gui_server
+    for method, path, body in [
+        ("GET", "/health/live", None),
+        ("GET", "/metrics", None),
+        ("POST", "/api/export", json.dumps({"format": "csv", "rows": []})),
+    ]:
+        connection = http.client.HTTPConnection(host, port)
+        connection.request(method, path, body=body, headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        response.read()
+        headers = {key.lower(): value for key, value in response.getheaders()}
+        connection.close()
+
+        assert headers["x-content-type-options"] == "nosniff"
+        assert headers["referrer-policy"] == "no-referrer"
+        assert headers["permissions-policy"] == "camera=(), geolocation=(), microphone=()"
+        assert "frame-ancestors 'none'" in headers["content-security-policy"]

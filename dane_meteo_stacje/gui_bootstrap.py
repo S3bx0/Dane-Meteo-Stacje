@@ -16,16 +16,30 @@ from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from .api_contract import OPENAPI_DOCUMENT
 from .cli import search_stations
-from .data import NoaaClientError, StationRecord, fetch_stations_with_cache_details
+from .data import NoaaClientError, NoaaTimeoutError, StationRecord, fetch_stations_with_cache_details
 from .diagnostics import fetch_error_code, render_fetch_error
+from .metrics import MetricsRegistry
 from .observability import bind_request_id, configure_logging, log_event, reset_request_id
 
 MAX_REQUEST_BODY_BYTES = 256 * 1024
 MAX_CONCURRENT_FETCHES = 4
 FETCH_SLOT_TIMEOUT_SECONDS = 0.1
+REMOTE_REQUEST_DEADLINE_SECONDS = 15.0
 GUI_CACHE_DIR = Path.home() / ".cache" / "dane-meteo-stacje"
 _FETCH_LIMITER = BoundedSemaphore(MAX_CONCURRENT_FETCHES)
+_METRICS = MetricsRegistry()
+_KNOWN_METRIC_PATHS = {
+  "/",
+  "/api/export",
+  "/api/search",
+  "/health",
+  "/health/live",
+  "/health/ready",
+  "/metrics",
+  "/openapi.json",
+}
 
 
 class InvalidRequestBody(ValueError):
@@ -168,7 +182,7 @@ HTML_PAGE = """<!doctype html>
       </section>
     </main>
 
-    <script>
+    <script nonce="{{CSP_NONCE}}">
       let lastResults = [];
 
       const COUNTRY_OPTIONS = [
@@ -596,6 +610,7 @@ def _csv_from_rows(rows: list[StationRecord]) -> str:
 
 class AppHandler(BaseHTTPRequestHandler):
     request_id = ""
+    response_status = 0
 
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -606,8 +621,13 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._run_request("POST", self._dispatch_post)
 
+    def send_response(self, code: int, message: str | None = None) -> None:
+        self.response_status = code
+        super().send_response(code, message)
+
     def _run_request(self, method: str, dispatch: Callable[[], None]) -> None:
         self.request_id = uuid4().hex
+        self.response_status = 0
         context_token = bind_request_id(self.request_id)
         path = urlparse(self.path).path
         started_at = time.monotonic()
@@ -633,17 +653,43 @@ class AppHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 log_event("http_client_disconnected", level=logging.WARNING, method=method, path=path)
         finally:
-            duration_ms = round((time.monotonic() - started_at) * 1000, 3)
+            duration_seconds = time.monotonic() - started_at
+            duration_ms = round(duration_seconds * 1000, 3)
+            metric_path = path if path in _KNOWN_METRIC_PATHS else "<other>"
+            _METRICS.record_request(method, metric_path, self.response_status or 499, duration_seconds)
             log_event("http_request_completed", method=method, path=path, duration_ms=duration_ms)
             reset_request_id(context_token)
 
     def _dispatch_get(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self._send_text(HTML_PAGE, content_type="text/html; charset=utf-8")
+            csp_nonce = uuid4().hex
+            self._send_text(
+                HTML_PAGE.replace("{{CSP_NONCE}}", csp_nonce),
+                content_type="text/html; charset=utf-8",
+                csp_nonce=csp_nonce,
+            )
             return
-        if parsed.path == "/health":
-            self._send_json({"ok": True})
+        if parsed.path in {"/health", "/health/live"}:
+            self._send_json({"ok": True, "status": "alive"})
+            return
+        if parsed.path == "/health/ready":
+            self._send_json(
+                {
+                    "ok": True,
+                    "status": "ready",
+                    "checks": {"http": "ok", "cache": "optional", "noaa": "request-scoped"},
+                }
+            )
+            return
+        if parsed.path == "/openapi.json":
+            self._send_json(OPENAPI_DOCUMENT, include_request_id=False)
+            return
+        if parsed.path == "/metrics":
+            self._send_text(
+                _METRICS.render_prometheus(),
+                content_type="text/plain; version=0.0.4; charset=utf-8",
+            )
             return
         self._send_json({"code": "NOT_FOUND", "message": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -679,26 +725,58 @@ class AppHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise InvalidRequestBody("Request body must be valid UTF-8 JSON") from exc
 
-    def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-        response_payload = {**payload, "request_id": self.request_id}
+    def _send_json(
+        self,
+        payload: dict[str, Any],
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        include_request_id: bool = True,
+    ) -> None:
+        response_payload = {**payload, "request_id": self.request_id} if include_request_id else payload
         body = json.dumps(response_payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Request-ID", self.request_id)
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
         log_event("http_response_sent", method=self.command, path=urlparse(self.path).path, status=int(status))
 
-    def _send_text(self, payload: str, *, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _send_text(
+      self,
+      payload: str,
+      *,
+      content_type: str,
+      status: HTTPStatus = HTTPStatus.OK,
+      csp_nonce: str | None = None,
+    ) -> None:
         body = payload.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Request-ID", self.request_id)
+        self._send_security_headers(csp_nonce=csp_nonce)
         self.end_headers()
         self.wfile.write(body)
         log_event("http_response_sent", method=self.command, path=urlparse(self.path).path, status=int(status))
+
+    def _send_security_headers(self, *, csp_nonce: str | None = None) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
+        self.send_header("Cache-Control", "no-store")
+        if csp_nonce is None:
+          policy = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+        else:
+          policy = (
+            "default-src 'none'; "
+            f"script-src 'nonce-{csp_nonce}'; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "connect-src 'self'; img-src 'self' data:; "
+            "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+          )
+        self.send_header("Content-Security-Policy", policy)
 
     def _handle_search(self) -> None:
         payload = self._read_json()
@@ -739,6 +817,7 @@ class AppHandler(BaseHTTPRequestHandler):
         sort_by = str(payload.get("sort", "city"))
 
         if not _FETCH_LIMITER.acquire(timeout=FETCH_SLOT_TIMEOUT_SECONDS):
+            _METRICS.record_server_busy()
             log_event(
                 "station_fetch_rejected",
                 level=logging.WARNING,
@@ -752,6 +831,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            _METRICS.fetch_started()
             try:
                 if cache_path is not None:
                     GUI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -763,8 +843,10 @@ class AppHandler(BaseHTTPRequestHandler):
                     allow_sample_fallback=bool(payload.get("allow_sample_fallback", False)),
                     stale_if_error=bool(payload.get("stale_if_error", False)),
                     max_stale_seconds=max_stale,
+                    remote_timeout_seconds=REMOTE_REQUEST_DEADLINE_SECONDS,
                 )
             finally:
+                _METRICS.fetch_finished()
                 _FETCH_LIMITER.release()
 
             normalized_country = str(country).strip() if country else None
@@ -803,6 +885,12 @@ class AppHandler(BaseHTTPRequestHandler):
 
                 if limit is not None:
                     rows = rows[:limit]
+        except NoaaTimeoutError as exc:
+            self._send_json(
+                {"code": fetch_error_code(exc), "message": render_fetch_error(exc)},
+                status=HTTPStatus.GATEWAY_TIMEOUT,
+            )
+            return
         except NoaaClientError as exc:
             self._send_json(
                 {
@@ -820,6 +908,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 "metadata": result.metadata,
             }
         )
+        if result.source in {"cache-stale", "sample-fallback"}:
+            _METRICS.record_fallback(result.source)
 
     def _handle_export(self) -> None:
         payload = self._read_json()
@@ -873,6 +963,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Disposition", 'attachment; filename="stations.csv"')
             self.send_header("Content-Length", str(len(body)))
             self.send_header("X-Request-ID", self.request_id)
+            self._send_security_headers()
             self.end_headers()
             self.wfile.write(body)
             log_event("http_response_sent", method=self.command, path=urlparse(self.path).path, status=HTTPStatus.OK)
@@ -885,6 +976,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Disposition", 'attachment; filename="stations.json"')
             self.send_header("Content-Length", str(len(body)))
             self.send_header("X-Request-ID", self.request_id)
+            self._send_security_headers()
             self.end_headers()
             self.wfile.write(body)
             log_event("http_response_sent", method=self.command, path=urlparse(self.path).path, status=HTTPStatus.OK)

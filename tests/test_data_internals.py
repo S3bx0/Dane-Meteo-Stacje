@@ -11,6 +11,7 @@ from dane_meteo_stacje.data import (
     NoaaNetworkError,
     NoaaPayloadError,
     NoaaRateLimitError,
+    NoaaTimeoutError,
     _extract_city_from_noaa_item,
     _infer_country_from_noaa_item,
     _normalize_noaa_payload,
@@ -114,6 +115,14 @@ def test_noaa_client_raises_network_error_after_request_exception():
     client._session = _DummySession([requests.RequestException("boom")])
 
     with pytest.raises(NoaaNetworkError):
+        client.fetch_json("https://example.invalid", token="t1")
+
+
+def test_noaa_client_maps_request_timeout_to_deadline_error():
+    client = NoaaClient(max_retries_rate_limit=0, max_retries_server_error=0)
+    client._session = _DummySession([requests.Timeout("slow")])
+
+    with pytest.raises(NoaaTimeoutError, match="deadline"):
         client.fetch_json("https://example.invalid", token="t1")
 
 

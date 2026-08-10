@@ -202,6 +202,23 @@ Zewnetrzne GitHub Actions sa przypiete do pelnych commit SHA. CodeQL analizuje k
 na `main`, w pull requestach i wedlug tygodniowego harmonogramu. GitHub Secret Scanning
 z push protection oraz aktualizacje bezpieczenstwa Dependabota sa wlaczone dla repozytorium.
 
+## Operacyjnosc HTTP
+
+Serwer GUI udostepnia wersjonowany kontrakt i endpointy diagnostyczne:
+
+- `GET /openapi.json` - kontrakt OpenAPI 3.1 zgodny z wersja pakietu,
+- `GET /health/live` - lekki liveness procesu; `/health` pozostaje aliasem kompatybilnosci,
+- `GET /health/ready` - readiness bez wykonywania zapytania do NOAA,
+- `GET /metrics` - metryki Prometheus requestow, bledow, fallbackow, przeciazenia i czasu odpowiedzi.
+
+Pobieranie z NOAA ma 15-sekundowy budzet obejmujacy cala sekwencje retry, backoff i
+przekierowan. Przekroczenie budzetu zwraca kontrolowane `504 NOAA_TIMEOUT`. Odpowiedzi
+HTTP zawieraja CSP, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`,
+`Cache-Control: no-store` oraz korelacyjny `X-Request-ID`.
+
+Szczegoly retencji cache i logow, semantyka healthcheckow oraz procedura awarii NOAA sa
+opisane w `OPERATIONS.md`.
+
 ## Zrodla danych i noty
 
 - Projekt korzysta z danych stacji publikowanych przez NOAA/NCEI API.
