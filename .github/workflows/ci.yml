@@ -42,7 +42,7 @@ jobs:
       - name: Pytest with coverage
         env:
           COVERAGE_PROCESS_START: pyproject.toml
-        run: python -m pytest --cov=dane_meteo_stacje --cov-report=term-missing --cov-fail-under=90
+        run: python -m pytest -m "not e2e" --cov=dane_meteo_stacje --cov-report=term-missing --cov-fail-under=93
 
   compatibility:
     runs-on: ubuntu-latest
@@ -64,10 +64,32 @@ jobs:
       - name: Install package and test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e . pytest
+          python -m pip install -e . hypothesis pytest
 
       - name: Run tests
-        run: python -m pytest
+        run: python -m pytest -m "not e2e"
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Install package and E2E dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[e2e]
+          python -m playwright install --with-deps chromium
+
+      - name: Run browser E2E tests
+        run: python -m pytest tests/test_gui_e2e.py -q
 
   package:
     runs-on: ubuntu-latest

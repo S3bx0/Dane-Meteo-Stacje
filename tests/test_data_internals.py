@@ -15,6 +15,7 @@ from dane_meteo_stacje.data import (
     _infer_country_from_noaa_item,
     _normalize_noaa_payload,
     _normalize_station,
+    fetch_remote_stations,
     fetch_stations_with_cache_details,
     load_stations,
 )
@@ -44,6 +45,14 @@ class _DummySession:
         if isinstance(event, Exception):
             raise event
         return event
+
+
+class _DummyNoaaClient:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def fetch_json(self, url, token=None):
+        return self.payload, 200, {"etag": "e1", "last_modified": "lm1"}
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +115,35 @@ def test_noaa_client_raises_network_error_after_request_exception():
 
     with pytest.raises(NoaaNetworkError):
         client.fetch_json("https://example.invalid", token="t1")
+
+
+@pytest.mark.parametrize("status", [400, 404, 500, 503])
+def test_noaa_client_raises_network_error_for_terminal_http_status(status):
+    client = NoaaClient(max_retries_rate_limit=0, max_retries_server_error=0, backoff_seconds=0, jitter_seconds=0)
+    client._session = _DummySession([_DummyResponse(status)])
+
+    with pytest.raises(NoaaNetworkError, match=f"HTTP {status}"):
+        client.fetch_json("https://example.invalid", token="t1")
+
+
+def test_noaa_client_retries_server_error_then_succeeds():
+    client = NoaaClient(max_retries_rate_limit=0, max_retries_server_error=1, backoff_seconds=0, jitter_seconds=0)
+    client._session = _DummySession(
+        [_DummyResponse(503), _DummyResponse(200, payload={"results": []})]
+    )
+
+    payload, status, _ = client.fetch_json("https://example.invalid", token="t1")
+
+    assert status == 200
+    assert payload == {"results": []}
+
+
+def test_noaa_client_rejects_redirect_without_location():
+    client = NoaaClient()
+    client._session = _DummySession([_DummyResponse(302)])
+
+    with pytest.raises(NoaaNetworkError, match="Location"):
+        client.fetch_json("https://example.invalid/stations")
 
 
 def test_noaa_client_rejects_non_https_url():
@@ -236,6 +274,28 @@ def test_normalize_noaa_payload_collects_geo_stats():
     assert stats["geo_valid"] == 1
     assert stats["geo_missing"] == 1
     assert stats["geo_out_of_range"] == 1
+
+
+def test_fetch_remote_stations_normalizes_noaa_results_with_metadata():
+    stations, metadata = fetch_remote_stations(
+        "https://example.invalid/stations",
+        client=_DummyNoaaClient(
+            {"results": [{"id": "PL0001", "name": "Leba", "country": "PL"}]}
+        ),
+    )
+
+    assert stations[0]["station_id"] == "PL0001"
+    assert metadata["payload_shape"] == "noaa-results"
+    assert metadata["etag"] == "e1"
+    assert metadata["normalization"]["geo_missing"] == 1
+
+
+def test_fetch_remote_stations_rejects_unsupported_payload():
+    with pytest.raises(NoaaPayloadError, match="Unsupported NOAA payload format"):
+        fetch_remote_stations(
+            "https://example.invalid/stations",
+            client=_DummyNoaaClient({"unexpected": "shape"}),
+        )
 
 
 def test_fetch_stations_with_cache_returns_sample_default_without_remote(tmp_path):

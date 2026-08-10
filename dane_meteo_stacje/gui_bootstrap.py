@@ -78,20 +78,20 @@ HTML_PAGE = """<!doctype html>
       <section class="panel rounded-4 shadow-sm p-3 p-md-4 mb-3">
         <div class="row g-3">
           <div class="col-md-4">
-            <label class="form-label">Query (optional)</label>
+            <label for="query" class="form-label">Query (optional)</label>
             <input id="query" class="form-control" placeholder="city or station name" />
           </div>
           <div class="col-md-2">
-            <label class="form-label">Country</label>
+            <label for="country" class="form-label">Country</label>
             <input id="country" class="form-control" list="country-options" placeholder="Poland / Polska" />
             <datalist id="country-options"></datalist>
           </div>
           <div class="col-md-3">
-            <label class="form-label">Station ID</label>
+            <label for="station-id" class="form-label">Station ID</label>
             <input id="station-id" class="form-control mono" placeholder="PL000012120" />
           </div>
           <div class="col-md-2">
-            <label class="form-label">Sort</label>
+            <label for="sort" class="form-label">Sort</label>
             <select id="sort" class="form-select">
               <option value="city">city</option>
               <option value="name">name</option>
@@ -99,12 +99,12 @@ HTML_PAGE = """<!doctype html>
             </select>
           </div>
           <div class="col-md-1">
-            <label class="form-label">Limit</label>
+            <label for="limit" class="form-label">Limit</label>
             <input id="limit" type="number" min="1" class="form-control" placeholder="10" />
           </div>
 
           <div class="col-md-7">
-            <label class="form-label">Remote URL</label>
+            <label for="remote-url" class="form-label">Remote URL</label>
             <input
               id="remote-url"
               class="form-control mono"
@@ -113,11 +113,11 @@ HTML_PAGE = """<!doctype html>
             <div class="form-text">Example: FIPS:PL (Poland), FIPS:HU (Hungary), FIPS:SP (Spain).</div>
           </div>
           <div class="col-md-3">
-            <label class="form-label">Cache File</label>
+            <label for="cache-path" class="form-label">Cache File</label>
             <input id="cache-path" class="form-control mono" placeholder="cache.json" />
           </div>
           <div class="col-md-2">
-            <label class="form-label">Cache TTL (s)</label>
+            <label for="cache-ttl" class="form-label">Cache TTL (s)</label>
             <input id="cache-ttl" type="number" min="0" class="form-control" value="3600" />
           </div>
 

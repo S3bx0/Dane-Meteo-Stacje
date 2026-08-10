@@ -5,7 +5,14 @@ from pathlib import Path
 import pytest
 
 from dane_meteo_stacje import data
-from dane_meteo_stacje.data import FetchResult, NoaaNetworkError, fetch_stations_with_cache_details, read_cache_metadata
+from dane_meteo_stacje.data import (
+    FetchResult,
+    NoaaNetworkError,
+    NoaaPayloadError,
+    fetch_stations_with_cache,
+    fetch_stations_with_cache_details,
+    read_cache_metadata,
+)
 
 
 def _write_cache(cache_file: Path, stations: list[dict], *, fetched_at: int, source_url: str):
@@ -169,4 +176,51 @@ def test_stale_cache_raises_when_older_than_max_stale(tmp_path, monkeypatch):
             cache_ttl=0,
             stale_if_error=True,
             max_stale_seconds=60,
+        )
+
+
+def test_expired_cache_is_available_without_remote_source(tmp_path):
+    cache_file = tmp_path / "cache.json"
+    _write_cache(
+        cache_file,
+        [{"station_id": "C5", "city": "Cached", "name": "Cached", "country": "Poland"}],
+        fetched_at=int(time.time()) - 7200,
+        source_url="https://example.com/stations",
+    )
+
+    result = fetch_stations_with_cache_details(cache_path=cache_file, cache_ttl=0)
+
+    assert result.source == "cache"
+    assert result.stations[0]["station_id"] == "C5"
+    assert result.metadata["cache_age_seconds"] >= 7000
+
+
+def test_convenience_cache_wrapper_returns_stations(tmp_path):
+    stations = fetch_stations_with_cache(cache_path=tmp_path / "missing.json")
+
+    assert stations
+    assert all("station_id" in station for station in stations)
+
+
+def test_empty_remote_result_uses_sample_only_when_explicitly_allowed(tmp_path, monkeypatch):
+    monkeypatch.setattr(data, "fetch_remote_stations", lambda *args, **kwargs: ([], {}))
+
+    result = fetch_stations_with_cache_details(
+        cache_path=tmp_path / "missing.json",
+        remote_url="https://example.com/stations",
+        allow_sample_fallback=True,
+    )
+
+    assert result.source == "sample-fallback"
+    assert result.stations == data.STATIONS
+    assert result.metadata["warning"] == "Remote returned no stations"
+
+
+def test_empty_remote_result_raises_without_sample_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(data, "fetch_remote_stations", lambda *args, **kwargs: ([], {}))
+
+    with pytest.raises(NoaaPayloadError, match="no usable stations"):
+        fetch_stations_with_cache_details(
+            cache_path=tmp_path / "missing.json",
+            remote_url="https://example.com/stations",
         )

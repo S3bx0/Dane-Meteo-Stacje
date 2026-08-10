@@ -58,6 +58,25 @@ def _station(station_id: str, city: str, country: str = "Poland") -> dict[str, A
     }
 
 
+def _assert_json_contract(
+    headers: dict[str, str],
+    body: bytes,
+    *,
+    error_code: str | None = None,
+) -> dict[str, Any]:
+    assert headers["content-type"] == "application/json; charset=utf-8"
+    assert int(headers["content-length"]) == len(body)
+    payload = json.loads(body)
+    assert isinstance(payload, dict)
+    assert len(payload["request_id"]) == 32
+    assert headers["x-request-id"] == payload["request_id"]
+    if error_code is not None:
+        assert payload["code"] == error_code
+        assert isinstance(payload["message"], str)
+        assert payload["message"]
+    return payload
+
+
 def test_get_routes(gui_server):
     status, headers, body = _request(gui_server, "GET", "/")
     assert status == 200
@@ -74,6 +93,34 @@ def test_get_routes(gui_server):
     status, _, body = _request(gui_server, "GET", "/missing")
     assert status == 404
     assert json.loads(body)["code"] == "NOT_FOUND"
+
+
+def test_endpoint_json_contracts(gui_server, monkeypatch):
+    monkeypatch.setattr(
+        gui,
+        "fetch_stations_with_cache_details",
+        lambda **kwargs: FetchResult(stations=[_station("PL1", "Warsaw")], source="remote", metadata={}),
+    )
+
+    cases = [
+        ("GET", "/health", None, None),
+        ("GET", "/missing", None, "NOT_FOUND"),
+        ("POST", "/missing", {}, "NOT_FOUND"),
+        ("POST", "/api/search", {"query": "Warsaw"}, None),
+        ("POST", "/api/search", {"limit": 0}, "BAD_REQUEST"),
+        ("POST", "/api/export", {"format": "xml", "rows": []}, "BAD_REQUEST"),
+    ]
+
+    for method, path, request_payload, error_code in cases:
+        status, headers, body = _request(gui_server, method, path, request_payload)
+        payload = _assert_json_contract(headers, body, error_code=error_code)
+        assert status == (200 if error_code is None else 400 if error_code == "BAD_REQUEST" else 404)
+        if path == "/health":
+            assert payload["ok"] is True
+        elif path == "/api/search" and error_code is None:
+            assert payload["source"] == "remote"
+            assert isinstance(payload["results"], list)
+            assert isinstance(payload["metadata"], dict)
 
 
 def test_concurrent_health_requests_have_unique_correlated_request_ids(gui_server):
@@ -148,6 +195,18 @@ def test_fetch_concurrency_limit_returns_503_without_blocking_health(gui_server,
 def test_app_http_server_uses_daemon_request_threads():
     assert gui.AppHTTPServer.daemon_threads is True
     assert gui.AppHTTPServer.allow_reuse_address is True
+
+
+def test_server_shutdown_stops_serving_thread():
+    server = gui.AppHTTPServer(("127.0.0.1", 0), gui.AppHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=1)
+
+    assert thread.is_alive() is False
 
 
 def test_post_rejects_unknown_route_and_invalid_json(gui_server):

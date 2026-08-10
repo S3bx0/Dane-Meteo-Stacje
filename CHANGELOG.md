@@ -9,6 +9,10 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
 
 - CycloneDX SBOM, sumy SHA-256 i GitHub Artifact Attestation dla nowych wydan.
 - Analiza CodeQL dla kodu Pythona na `main`, w pull requestach i co tydzien.
+- Kontrakty odpowiedzi API z correlation ID oraz testy poprawnego zamykania serwera.
+- Testy wlasnosciowe Hypothesis dla normalizacji, wyszukiwania i serializacji danych.
+- Scenariusze E2E interfejsu w Chromium przez Playwright, uruchamiane w osobnym zadaniu CI.
+- Podniesienie wymaganej wartosci coverage z 90% do 93%.
 
 ### Security
 

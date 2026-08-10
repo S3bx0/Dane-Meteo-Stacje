@@ -169,15 +169,27 @@ W przyszłości dane z tego narzędzia mogą być używane jako warstwa wejścio
 ## Testy
 
 ```bash
-python -m pytest -q
+python -m pip install -e .[dev]
+python -m pytest -m "not e2e" -q
 ```
 
-CI blokuje zmiany, ktore nie przechodza Ruff, mypy, testow z coverage co najmniej 90%,
+Testy kontraktow API sprawdzaja spojny format odpowiedzi i correlation ID, a testy
+wlasnosciowe Hypothesis obejmuja normalizacje danych, wyszukiwanie oraz serializacje.
+Opcjonalne scenariusze przegladarkowe mozna uruchomic osobno:
+
+```bash
+python -m pip install -e .[e2e]
+python -m playwright install chromium
+python -m pytest tests/test_gui_e2e.py -q
+```
+
+CI blokuje zmiany, ktore nie przechodza Ruff, mypy, testow z coverage co najmniej 93%,
 skanu kodu Bandit albo audytu zaleznosci pip-audit. Osobny workflow `NOAA Smoke`
 codziennie sprawdza rzeczywiste API NOAA z sekretem `NOAA_API_TOKENS`; mozna go tez
 uruchomic recznie w GitHub Actions.
 
-CI uruchamia testy kompatybilnosci na Pythonie 3.10, 3.12 i 3.14. Buduje tez wheel oraz
+CI uruchamia testy kompatybilnosci na Pythonie 3.10, 3.12 i 3.14 oraz osobne testy E2E
+w Chromium przez Playwright. Buduje tez wheel oraz
 archiwum zrodlowe, sprawdza ich metadane i instaluje wheel w czystym srodowisku. Gotowe
 pliki sa dostepne w artefakcie `python-distributions` danego runu GitHub Actions.
 
