@@ -1,27 +1,46 @@
 from __future__ import annotations
 
+import calendar
 import csv
 import hashlib
 import ipaddress
 import json
 import logging
 import os
+import re
 import socket
+import tempfile
 import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from random import SystemRandom
+from threading import Lock
 from typing import Any, TypedDict, cast
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 import requests
+from dotenv import dotenv_values
 from typing_extensions import NotRequired
 
+from . import __version__
+from .countries import COUNTRY_CODE_MAP, country_to_fips_code, normalize_country_name
 from .observability import log_event
 
 _RANDOM = SystemRandom()
 _MAX_REDIRECTS = 5
+NOAA_API_BASE_URL = "https://www.ncei.noaa.gov/cdo-web/api/v2"
+NOAA_STATIONS_ENDPOINT = f"{NOAA_API_BASE_URL}/stations"
+NOAA_DATA_ENDPOINT = f"{NOAA_API_BASE_URL}/data"
+NOAA_DATATYPES_ENDPOINT = f"{NOAA_API_BASE_URL}/datatypes"
+NOAA_PAGE_LIMIT = 1000
+MONTH_NAMES = [calendar.month_name[index] for index in range(1, 13)]
+CORE_TEMPERATURE_DATATYPES = ("TMIN", "TAVG", "TMAX")
+TEMPERATURE_EXPORT_MODES = ("daily", "monthly", "extended")
+TOKEN_ENV_NAMES = ("NOAA_API_TOKENS", "NOAA_TOKENS", "NOAA_TOKEN")
+TOKEN_REQUEST_INTERVAL_SECONDS = 0.26
 
 
 class NoaaClientError(Exception):
@@ -94,8 +113,41 @@ class StationRecord(TypedDict):
     country: str
     latitude: NotRequired[float]
     longitude: NotRequired[float]
+    elevation: NotRequired[float]
+    mindate: NotRequired[str]
+    maxdate: NotRequired[str]
+    datacoverage: NotRequired[float]
     source: NotRequired[str]
     notes: NotRequired[str]
+
+
+def private_env_file_path() -> Path:
+    """Return the per-user token file, outside a possibly shared project folder."""
+
+    local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+    base = Path(local_app_data) if local_app_data else Path.home() / ".config"
+    return base / "Dane-Meteo-Stacje" / ".env"
+
+
+def resolve_env_file() -> Path:
+    """Choose explicit, private or legacy project configuration in that order."""
+
+    configured = os.getenv("DANE_METEO_ENV_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+
+    private_file = private_env_file_path()
+    project_file = Path.cwd() / ".env"
+    if private_file.is_file():
+        private_values = dotenv_values(private_file)
+        if any(
+            isinstance(private_values.get(name), str) and str(private_values[name]).strip()
+            for name in TOKEN_ENV_NAMES
+        ):
+            return private_file
+    if project_file.is_file():
+        return project_file
+    return private_file
 
 
 class TokenProvider:
@@ -105,64 +157,148 @@ class TokenProvider:
         *,
         rate_limit_cooldown_seconds: int = 30,
         auth_quarantine_seconds: int = 300,
+        request_interval_seconds: float = 0.0,
         now_fn: Any | None = None,
+        sleep_fn: Any | None = None,
     ) -> None:
         cleaned = [token.strip() for token in tokens if token and token.strip()]
         self._tokens = cleaned
         self._cursor = 0
         self._rate_limit_cooldown_seconds = rate_limit_cooldown_seconds
         self._auth_quarantine_seconds = auth_quarantine_seconds
+        self._request_interval_seconds = max(float(request_interval_seconds), 0.0)
         self._now_fn = now_fn or time.time
+        self._sleep_fn = sleep_fn or time.sleep
         self._blocked_until: dict[str, float] = {}
+        self._next_request_at: dict[str, float] = {}
+        self._usage = {token: 0 for token in cleaned}
+        self._rate_limit_events = 0
+        self._lock = Lock()
 
     @classmethod
-    def from_env(cls) -> TokenProvider:
+    def configured_tokens(cls) -> list[str]:
+        env_file = resolve_env_file()
+        file_values = dotenv_values(env_file) if env_file.is_file() else {}
+
+        def configured_value(name: str) -> str:
+            process_value = os.getenv(name, "")
+            if process_value.strip():
+                return process_value
+            file_value = file_values.get(name)
+            return file_value if isinstance(file_value, str) else ""
+
         tokens: list[str] = []
-        api_tokens_env = os.getenv("NOAA_API_TOKENS", "")
+        api_tokens_env = configured_value("NOAA_API_TOKENS")
         if api_tokens_env.strip():
             tokens.extend([token.strip() for token in api_tokens_env.split(",") if token.strip()])
 
-        tokens_env = os.getenv("NOAA_TOKENS", "")
+        tokens_env = configured_value("NOAA_TOKENS")
         if tokens_env.strip():
             tokens.extend([token.strip() for token in tokens_env.split(",") if token.strip()])
 
-        single_token = os.getenv("NOAA_TOKEN", "").strip()
+        single_token = configured_value("NOAA_TOKEN").strip()
         if single_token and single_token not in tokens:
             tokens.append(single_token)
         # Keep order while removing duplicates.
         unique_tokens = list(dict.fromkeys(tokens))
-        return cls(unique_tokens)
+        return unique_tokens
+
+    @classmethod
+    def from_env(cls) -> TokenProvider:
+        return cls(cls.configured_tokens())
 
     def has_tokens(self) -> bool:
-        return bool(self._tokens)
+        with self._lock:
+            return bool(self._tokens)
 
     def has_available_token(self) -> bool:
-        now = float(self._now_fn())
-        return any(self._blocked_until.get(token, 0.0) <= now for token in self._tokens)
+        with self._lock:
+            now = float(self._now_fn())
+            return any(self._blocked_until.get(token, 0.0) <= now for token in self._tokens)
 
-    def acquire(self) -> str | None:
-        if not self._tokens:
-            return None
+    def acquire(self, *, wait_for_slot: bool = False, max_wait_seconds: float = 1.0) -> str | None:
+        wait_deadline = time.monotonic() + max(max_wait_seconds, 0.0)
+        while True:
+            wait_seconds: float | None = None
+            with self._lock:
+                if not self._tokens:
+                    return None
 
-        now = float(self._now_fn())
-        total = len(self._tokens)
-        for step in range(total):
-            idx = (self._cursor + step) % total
-            token = self._tokens[idx]
-            if self._blocked_until.get(token, 0.0) <= now:
-                self._cursor = (idx + 1) % total
-                return token
-        return None
+                now = float(self._now_fn())
+                total = len(self._tokens)
+                for step in range(total):
+                    idx = (self._cursor + step) % total
+                    token = self._tokens[idx]
+                    if self._blocked_until.get(token, 0.0) > now:
+                        continue
+                    next_request = self._next_request_at.get(token, 0.0)
+                    if next_request <= now:
+                        self._cursor = (idx + 1) % total
+                        self._usage[token] += 1
+                        self._next_request_at[token] = now + self._request_interval_seconds
+                        return token
+                    token_wait = next_request - now
+                    wait_seconds = token_wait if wait_seconds is None else min(wait_seconds, token_wait)
+
+                if wait_seconds is None:
+                    # Every token is quarantined because of authentication or HTTP 429.
+                    return None
+
+            if not wait_for_slot or time.monotonic() + wait_seconds > wait_deadline:
+                return None
+            self._sleep_fn(max(wait_seconds, 0.001))
 
     def mark_rate_limited(self, token: str | None) -> None:
         if not token:
             return
-        self._blocked_until[token] = float(self._now_fn()) + float(self._rate_limit_cooldown_seconds)
+        with self._lock:
+            self._blocked_until[token] = float(self._now_fn()) + float(self._rate_limit_cooldown_seconds)
+            self._rate_limit_events += 1
 
     def mark_auth_failed(self, token: str | None) -> None:
         if not token:
             return
-        self._blocked_until[token] = float(self._now_fn()) + float(self._auth_quarantine_seconds)
+        with self._lock:
+            self._blocked_until[token] = float(self._now_fn()) + float(self._auth_quarantine_seconds)
+
+    def usage_summary(self) -> dict[str, int]:
+        with self._lock:
+            summary: dict[str, int] = {}
+            for token, count in self._usage.items():
+                masked = _mask_token(token)
+                summary[masked] = summary.get(masked, 0) + count
+            return summary
+
+    @property
+    def token_count(self) -> int:
+        with self._lock:
+            return len(self._tokens)
+
+    @property
+    def rate_limit_events(self) -> int:
+        with self._lock:
+            return self._rate_limit_events
+
+
+_SHARED_PROVIDER_LOCK = Lock()
+_SHARED_PROVIDER_SIGNATURE: tuple[str, ...] = ()
+_SHARED_PROVIDER: TokenProvider | None = None
+
+
+def shared_env_token_provider() -> TokenProvider | None:
+    """Keep cooldowns and fair rotation alive across local HTTP requests."""
+
+    global _SHARED_PROVIDER, _SHARED_PROVIDER_SIGNATURE
+    tokens = TokenProvider.configured_tokens()
+    signature = tuple(tokens)
+    with _SHARED_PROVIDER_LOCK:
+        if _SHARED_PROVIDER is None or signature != _SHARED_PROVIDER_SIGNATURE:
+            _SHARED_PROVIDER = TokenProvider(
+                tokens,
+                request_interval_seconds=TOKEN_REQUEST_INTERVAL_SECONDS,
+            )
+            _SHARED_PROVIDER_SIGNATURE = signature
+        return _SHARED_PROVIDER if _SHARED_PROVIDER.has_tokens() else None
 
 
 def _token_fingerprint(token: str | None) -> str | None:
@@ -171,24 +307,15 @@ def _token_fingerprint(token: str | None) -> str | None:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:10]
 
 
+def _mask_token(token: str) -> str:
+    if len(token) <= 8:
+        return f"{token[:2]}***"
+    return f"{token[:4]}...{token[-4:]}"
+
+
 def _clone_station(station: StationRecord) -> StationRecord:
     return cast(StationRecord, dict(station))
 
-
-COUNTRY_CODE_MAP: dict[str, str] = {
-    "PL": "Poland",
-    "US": "USA",
-    "DE": "Germany",
-    "FR": "France",
-    "IT": "Italy",
-    "ES": "Spain",
-    "GB": "United Kingdom",
-    "CZ": "Czechia",
-    "SK": "Slovakia",
-    "LT": "Lithuania",
-    "LV": "Latvia",
-    "EE": "Estonia",
-}
 
 STATIONS: list[StationRecord] = [
     {
@@ -218,7 +345,7 @@ class NoaaClient:
         max_retries_server_error: int = 2,
         backoff_seconds: float = 0.25,
         jitter_seconds: float = 0.05,
-        user_agent: str = "dane-meteo-stacje/0.2",
+        user_agent: str = f"dane-meteo-stacje/{__version__}",
     ) -> None:
         self.timeout = timeout
         self.max_retries_rate_limit = max_retries_rate_limit
@@ -252,7 +379,6 @@ class NoaaClient:
             current_hostname = urlparse(current_url).hostname
             if token and current_hostname and _is_noaa_hostname(current_hostname):
                 headers["token"] = token
-                headers["Authorization"] = f"Bearer {token}"
 
             try:
                 response = self._session.get(
@@ -330,6 +456,17 @@ def _normalize_station(item: Any) -> StationRecord | None:
         if key in item:
             normalized[key] = str(item[key])
 
+    normalized_values = cast(dict[str, Any], normalized)
+    for key in ("latitude", "longitude", "elevation", "datacoverage"):
+        try:
+            if item.get(key) is not None:
+                normalized_values[key] = float(item[key])
+        except (TypeError, ValueError):
+            pass
+    for key in ("mindate", "maxdate"):
+        if isinstance(item.get(key), str) and str(item[key]).strip():
+            normalized_values[key] = str(item[key])
+
     return normalized
 
 
@@ -388,7 +525,8 @@ def _infer_country_from_noaa_item(item: dict[str, Any], station_id: str) -> str:
         return value
 
     def _country_from_station_prefix(station_code: str) -> str | None:
-        prefix = station_code[:2].upper()
+        bare_station_code = station_code.split(":", 1)[-1]
+        prefix = bare_station_code[:2].upper()
         return COUNTRY_CODE_MAP.get(prefix)
 
     country = item.get("country")
@@ -486,6 +624,25 @@ def _normalize_noaa_payload(payload: Any, *, stats: dict[str, int] | None = None
         else:
             quality["geo_out_of_range"] += 1
 
+        for source_key in ("mindate", "maxdate"):
+            source_value = item.get(source_key)
+            if isinstance(source_value, str) and source_value.strip():
+                normalized_record[source_key] = source_value
+
+        elevation = item.get("elevation")
+        try:
+            if elevation is not None:
+                normalized_record["elevation"] = float(elevation)
+        except (TypeError, ValueError):
+            pass
+
+        datacoverage = item.get("datacoverage")
+        try:
+            if datacoverage is not None:
+                normalized_record["datacoverage"] = float(datacoverage)
+        except (TypeError, ValueError):
+            pass
+
         normalized_records.append(normalized_record)
         quality["items_valid"] += 1
     return normalized_records
@@ -520,6 +677,53 @@ def load_stations(source: str | Path | None = None) -> list[StationRecord]:
     return normalized_records
 
 
+def _resolve_token_provider(token: str | None, token_provider: TokenProvider | None) -> TokenProvider | None:
+    provider = token_provider
+    if provider is None:
+        if token:
+            provider = TokenProvider([token])
+        else:
+            provider = shared_env_token_provider()
+    return provider
+
+
+def _fetch_noaa_json(
+    url: str,
+    *,
+    timeout: float = 10,
+    token: str | None = None,
+    client: NoaaClient | None = None,
+    token_provider: TokenProvider | None = None,
+) -> tuple[Any, int, dict[str, str], str | None]:
+    noaa_client = client or NoaaClient(timeout=timeout)
+    provider = _resolve_token_provider(token, token_provider)
+
+    if provider is None:
+        payload, http_status, response_meta = noaa_client.fetch_json(url, token=token)
+        return payload, http_status, response_meta, token
+
+    last_token_error: NoaaAuthError | NoaaRateLimitError | None = None
+    for _ in range(max(provider.token_count, 1)):
+        active_token = provider.acquire(wait_for_slot=True, max_wait_seconds=min(timeout, 1.0))
+        if active_token is None:
+            if last_token_error is not None:
+                raise last_token_error
+            raise NoaaAuthError("No healthy NOAA token available")
+        try:
+            payload, http_status, response_meta = noaa_client.fetch_json(url, token=active_token)
+            return payload, http_status, response_meta, active_token
+        except NoaaRateLimitError as exc:
+            provider.mark_rate_limited(active_token)
+            last_token_error = exc
+        except NoaaAuthError as exc:
+            provider.mark_auth_failed(active_token)
+            last_token_error = exc
+
+    if last_token_error is not None:
+        raise last_token_error
+    raise NoaaAuthError("No healthy NOAA token available")
+
+
 def fetch_remote_stations(
     url: str,
     timeout: float = 10,
@@ -527,47 +731,13 @@ def fetch_remote_stations(
     client: NoaaClient | None = None,
     token_provider: TokenProvider | None = None,
 ) -> tuple[list[StationRecord], dict[str, Any]]:
-    noaa_client = client or NoaaClient(timeout=timeout)
-    provider = token_provider
-    if provider is None:
-        if token:
-            provider = TokenProvider([token])
-        else:
-            env_provider = TokenProvider.from_env()
-            provider = env_provider if env_provider.has_tokens() else None
-
-    active_token: str | None = None
-    if provider is not None:
-        active_token = provider.acquire()
-        if active_token is None and provider.has_tokens():
-            raise NoaaAuthError("No healthy NOAA token available")
-    elif token:
-        active_token = token
-
-    try:
-        payload, http_status, response_meta = noaa_client.fetch_json(url, token=active_token)
-    except NoaaRateLimitError:
-        if provider is not None and active_token:
-            provider.mark_rate_limited(active_token)
-            retry_token = provider.acquire()
-            if retry_token is not None:
-                payload, http_status, response_meta = noaa_client.fetch_json(url, token=retry_token)
-                active_token = retry_token
-            else:
-                raise
-        else:
-            raise
-    except NoaaAuthError:
-        if provider is not None and active_token:
-            provider.mark_auth_failed(active_token)
-            retry_token = provider.acquire()
-            if retry_token is not None:
-                payload, http_status, response_meta = noaa_client.fetch_json(url, token=retry_token)
-                active_token = retry_token
-            else:
-                raise
-        else:
-            raise
+    payload, http_status, response_meta, active_token = _fetch_noaa_json(
+        url,
+        timeout=timeout,
+        token=token,
+        client=client,
+        token_provider=token_provider,
+    )
 
     if isinstance(payload, list):
         records = payload
@@ -605,6 +775,32 @@ def fetch_remote_stations(
 def _cache_metadata_path(cache_path: str | Path) -> Path:
     cache_file = Path(cache_path)
     return cache_file.with_suffix(cache_file.suffix + ".meta.json")
+
+
+def _write_json_atomic(path: str | Path, payload: Any, *, indent: int | None = 2) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_name = handle.name
+            json.dump(payload, handle, ensure_ascii=False, indent=indent)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, destination)
+    finally:
+        if temporary_name:
+            try:
+                Path(temporary_name).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def read_cache_metadata(cache_path: str | Path) -> dict[str, Any]:
@@ -654,10 +850,7 @@ def _write_cache_metadata(
     if last_modified is not None:
         metadata["last_modified"] = last_modified
 
-    metadata_path.write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _write_json_atomic(metadata_path, metadata)
 
 
 def _resolve_cache_age_seconds(cache_file: Path, cache_metadata: dict[str, Any]) -> int:
@@ -678,6 +871,1180 @@ def _cache_matches_remote_source(cache_metadata: dict[str, Any], remote_url: str
         # Legacy cache metadata without source_url are treated as compatible.
         return True
     return cached_source.strip() == remote_url.strip()
+
+
+def _require_token_provider(token: str | None, token_provider: TokenProvider | None) -> TokenProvider:
+    provider = _resolve_token_provider(token, token_provider)
+    if provider is None or not provider.has_tokens():
+        raise NoaaAuthError(
+            "NOAA token is not configured; set NOAA_API_TOKENS, NOAA_TOKENS or NOAA_TOKEN"
+        )
+    return provider
+
+
+def _resultset_count(payload: Any) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    resultset = metadata.get("resultset")
+    if not isinstance(resultset, dict):
+        return None
+    try:
+        return int(resultset["count"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _read_country_station_cache(
+    cache_path: Path,
+    canonical_country: str,
+    *,
+    cache_ttl: int,
+    allow_stale: bool = False,
+) -> FetchResult | None:
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("country") != canonical_country:
+            return None
+        fetched_at = int(payload["fetched_at"])
+        age_seconds = max(int(time.time()) - fetched_at, 0)
+        if not allow_stale and age_seconds > max(cache_ttl, 0):
+            return None
+        raw_stations = payload.get("stations")
+        if not isinstance(raw_stations, list):
+            return None
+        stations = [station for item in raw_stations if (station := _normalize_station(item)) is not None]
+        if not stations:
+            return None
+        return FetchResult(
+            stations=stations,
+            source="noaa-country-cache-stale" if allow_stale else "noaa-country-cache",
+            metadata={
+                "country": canonical_country,
+                "country_code": payload.get("country_code"),
+                "location_id": payload.get("location_id"),
+                "returned_count": len(stations),
+                "cache_age_seconds": age_seconds,
+                "cache_path": str(cache_path),
+            },
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def fetch_stations_for_country(
+    country: str,
+    *,
+    token: str | None = None,
+    token_provider: TokenProvider | None = None,
+    timeout: float = 15,
+    page_limit: int = NOAA_PAGE_LIMIT,
+    max_pages: int = 200,
+    client: NoaaClient | None = None,
+    cache_path: str | Path | None = None,
+    cache_ttl: int = 24 * 60 * 60,
+    refresh: bool = False,
+    stale_if_error: bool = True,
+) -> FetchResult:
+    """Fetch every GHCND station for a country, following NOAA pagination."""
+
+    canonical_country = normalize_country_name(country)
+    country_code = country_to_fips_code(canonical_country)
+    country_cache = Path(cache_path) if cache_path is not None else None
+    if country_cache is not None and country_cache.is_file() and not refresh:
+        cached = _read_country_station_cache(
+            country_cache,
+            canonical_country,
+            cache_ttl=cache_ttl,
+        )
+        if cached is not None:
+            return cached
+
+    provider = _require_token_provider(token, token_provider)
+    noaa_client = client or NoaaClient(timeout=timeout, max_retries_rate_limit=0)
+    effective_limit = min(max(int(page_limit), 1), NOAA_PAGE_LIMIT)
+    offset = 1
+    pages = 0
+    total_count: int | None = None
+    stations_by_id: dict[str, StationRecord] = {}
+    normalization_totals: dict[str, int] = {}
+    operation_deadline = time.monotonic() + timeout
+
+    try:
+        while pages < max_pages:
+            remaining_timeout = operation_deadline - time.monotonic()
+            if remaining_timeout <= 0:
+                raise NoaaTimeoutError("NOAA station search deadline exceeded")
+            if isinstance(noaa_client, NoaaClient):
+                noaa_client.timeout = remaining_timeout
+            query = urlencode(
+                [
+                    ("datasetid", "GHCND"),
+                    ("locationid", f"FIPS:{country_code}"),
+                    ("datatypeid", "TMAX"),
+                    ("datatypeid", "TMIN"),
+                    ("limit", str(effective_limit)),
+                    ("offset", str(offset)),
+                    ("includemetadata", "true"),
+                ]
+            )
+            url = f"{NOAA_STATIONS_ENDPOINT}?{query}"
+            payload, _, _, _ = _fetch_noaa_json(
+                url,
+                timeout=remaining_timeout,
+                client=noaa_client,
+                token_provider=provider,
+            )
+            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+                raise NoaaPayloadError("NOAA stations response does not contain a results array")
+
+            raw_results = cast(list[Any], payload["results"])
+            if total_count is None:
+                total_count = _resultset_count(payload)
+
+            page_stats: dict[str, int] = {}
+            for station in _normalize_noaa_payload(payload, stats=page_stats):
+                station["country"] = canonical_country
+                stations_by_id[station["station_id"]] = station
+            for key, value in page_stats.items():
+                normalization_totals[key] = normalization_totals.get(key, 0) + value
+
+            pages += 1
+            received = len(raw_results)
+            if received == 0:
+                break
+            offset += received
+            if total_count is not None and offset > total_count:
+                break
+            if received < effective_limit:
+                break
+        else:
+            raise NoaaPayloadError(f"NOAA station pagination exceeded {max_pages} pages")
+    except NoaaClientError:
+        if country_cache is not None and country_cache.is_file() and stale_if_error:
+            stale = _read_country_station_cache(
+                country_cache,
+                canonical_country,
+                cache_ttl=cache_ttl,
+                allow_stale=True,
+            )
+            if stale is not None:
+                return stale
+        raise
+
+    stations = sorted(
+        stations_by_id.values(),
+        key=lambda station: (str(station.get("city", "")).casefold(), station["station_id"]),
+    )
+    result = FetchResult(
+        stations=stations,
+        source="noaa-country",
+        metadata={
+            "country": canonical_country,
+            "country_code": country_code,
+            "location_id": f"FIPS:{country_code}",
+            "pages": pages,
+            "reported_count": total_count,
+            "returned_count": len(stations),
+            "normalization": normalization_totals,
+        },
+    )
+    if country_cache is not None and stations:
+        _write_json_atomic(
+            country_cache,
+            {
+                "schema_version": 1,
+                "fetched_at": int(time.time()),
+                "country": canonical_country,
+                "country_code": country_code,
+                "location_id": f"FIPS:{country_code}",
+                "stations": stations,
+            },
+        )
+    return result
+
+
+def _normalize_ghcnd_station_id(station_id: str) -> str:
+    normalized = station_id.strip().upper()
+    if normalized.startswith("GHCND:"):
+        normalized = normalized.split(":", 1)[1]
+    if not re.fullmatch(r"[A-Z0-9]{11}", normalized):
+        raise ValueError("station_id must be an 11-character GHCND identifier")
+    return normalized
+
+
+def _monthly_temperatures_from_records(year: int, records: list[dict[str, Any]]) -> list[float | None]:
+    values: dict[tuple[int, str], list[float]] = {}
+    for record in records:
+        raw_date = record.get("date")
+        datatype = str(record.get("datatype", "")).upper()
+        if not isinstance(raw_date, str) or datatype not in {"TMAX", "TMIN"}:
+            continue
+        attributes = record.get("attributes")
+        if isinstance(attributes, str):
+            attribute_parts = attributes.split(",")
+            if len(attribute_parts) > 1 and attribute_parts[1].strip():
+                # NOAA's second attribute is QFLAG; non-empty values failed quality control.
+                continue
+        try:
+            record_year = int(raw_date[:4])
+            month = int(raw_date[5:7])
+            value = float(record["value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if record_year != year or not 1 <= month <= 12:
+            continue
+        values.setdefault((month, datatype), []).append(value)
+
+    monthly: list[float | None] = []
+    for month in range(1, 13):
+        datatype_means: list[float] = []
+        for datatype in ("TMAX", "TMIN"):
+            observations = values.get((month, datatype), [])
+            if observations:
+                datatype_means.append(sum(observations) / len(observations))
+        if datatype_means:
+            monthly.append(round(sum(datatype_means) / len(datatype_means), 2))
+        else:
+            monthly.append(None)
+    return monthly
+
+
+def _fetch_temperature_year(
+    year: int,
+    station_id: str,
+    *,
+    token_provider: TokenProvider,
+    timeout: float,
+    page_limit: int,
+) -> tuple[list[float | None], str]:
+    client = NoaaClient(timeout=timeout, max_retries_rate_limit=0)
+    offset = 1
+    records: list[dict[str, Any]] = []
+    total_count: int | None = None
+
+    while True:
+        query = urlencode(
+            [
+                ("datasetid", "GHCND"),
+                ("stationid", f"GHCND:{station_id}"),
+                ("startdate", f"{year}-01-01"),
+                ("enddate", f"{year}-12-31"),
+                ("datatypeid", "TMAX"),
+                ("datatypeid", "TMIN"),
+                ("units", "metric"),
+                ("limit", str(page_limit)),
+                ("offset", str(offset)),
+                ("includemetadata", "true"),
+            ]
+        )
+        payload, _, _, _ = _fetch_noaa_json(
+            f"{NOAA_DATA_ENDPOINT}?{query}",
+            timeout=timeout,
+            client=client,
+            token_provider=token_provider,
+        )
+        if not isinstance(payload, dict):
+            raise NoaaPayloadError("NOAA temperature response is not an object")
+        raw_results = payload.get("results", [])
+        if not isinstance(raw_results, list):
+            raise NoaaPayloadError("NOAA temperature response does not contain a results array")
+        if total_count is None:
+            total_count = _resultset_count(payload)
+        records.extend(item for item in raw_results if isinstance(item, dict))
+
+        received = len(raw_results)
+        if received == 0:
+            break
+        offset += received
+        if total_count is not None and offset > total_count:
+            break
+        if received < page_limit:
+            break
+
+    monthly = _monthly_temperatures_from_records(year, records)
+    return monthly, "OK" if any(value is not None for value in monthly) else "No temperature data"
+
+
+def _temperature_year_cache_path(cache_dir: Path, station_id: str, year: int) -> Path:
+    return cache_dir / station_id / f"{year}.json"
+
+
+def _read_temperature_year_cache(
+    cache_path: Path,
+    station_id: str,
+    year: int,
+    *,
+    cache_ttl_seconds: int,
+) -> tuple[list[float | None], str] | None:
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        fetched_at = int(payload["fetched_at"])
+        if int(time.time()) - fetched_at > max(cache_ttl_seconds, 0):
+            return None
+        if payload.get("station_id") != station_id or int(payload.get("year")) != year:
+            return None
+        monthly = payload.get("monthly")
+        if not isinstance(monthly, list) or len(monthly) != 12:
+            return None
+        normalized = [float(value) if isinstance(value, (int, float)) else None for value in monthly]
+        return normalized, str(payload.get("message") or "OK")
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _write_temperature_year_cache(
+    cache_path: Path,
+    station_id: str,
+    year: int,
+    monthly: list[float | None],
+    message: str,
+) -> None:
+    _write_json_atomic(
+        cache_path,
+        {
+            "schema_version": 1,
+            "fetched_at": int(time.time()),
+            "station_id": station_id,
+            "year": year,
+            "monthly": monthly,
+            "message": message,
+        },
+    )
+
+
+def fetch_monthly_temperature_matrix(
+    station_id: str,
+    start_year: int,
+    end_year: int,
+    *,
+    token: str | None = None,
+    token_provider: TokenProvider | None = None,
+    timeout: float = 30,
+    concurrency: int = 4,
+    max_attempts: int = 2,
+    cache_dir: str | Path | None = None,
+    cache_ttl_seconds: int = 30 * 24 * 60 * 60,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """Return the JSON matrix consumed by the Heatmapa application."""
+
+    normalized_station_id = _normalize_ghcnd_station_id(station_id)
+    current_year = time.gmtime().tm_year
+    if start_year < 1763 or end_year > current_year:
+        raise ValueError(f"year range must stay between 1763 and {current_year}")
+    if start_year > end_year:
+        raise ValueError("start_year must be less than or equal to end_year")
+    if end_year - start_year > 150:
+        raise ValueError("year range cannot exceed 151 years")
+
+    requested_years = list(range(start_year, end_year + 1))
+    year_to_monthly: dict[int, list[float | None]] = {}
+    missing_report: dict[int, str] = {}
+    temperature_cache_dir = Path(cache_dir) if cache_dir is not None else None
+    remaining: list[int] = []
+    if temperature_cache_dir is None or refresh:
+        remaining = requested_years.copy()
+    else:
+        for year in requested_years:
+            year_ttl = min(cache_ttl_seconds, 6 * 60 * 60) if year == current_year else cache_ttl_seconds
+            cached = _read_temperature_year_cache(
+                _temperature_year_cache_path(temperature_cache_dir, normalized_station_id, year),
+                normalized_station_id,
+                year,
+                cache_ttl_seconds=year_ttl,
+            )
+            if cached is None:
+                remaining.append(year)
+                continue
+            monthly, message = cached
+            year_to_monthly[year] = monthly
+            if not any(value is not None for value in monthly):
+                missing_report[year] = message
+
+    provider = _require_token_provider(token, token_provider) if remaining else None
+    adaptive_history: list[dict[str, Any]] = []
+    workers = min(max(int(concurrency), 1), 8, max(len(remaining), 1))
+    technical_errors: dict[int, NoaaClientError] = {}
+
+    for attempt in range(1, max(max_attempts, 1) + 1):
+        if not remaining:
+            break
+        attempt_years = remaining
+        remaining = []
+        if provider is None:
+            break
+        rate_limit_before = provider.rate_limit_events
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="noaa-temperature") as executor:
+            futures = {
+                executor.submit(
+                    _fetch_temperature_year,
+                    year,
+                    normalized_station_id,
+                    token_provider=provider,
+                    timeout=timeout,
+                    page_limit=NOAA_PAGE_LIMIT,
+                ): year
+                for year in attempt_years
+            }
+            for future in as_completed(futures):
+                year = futures[future]
+                try:
+                    monthly, message = future.result()
+                except NoaaClientError as exc:
+                    remaining.append(year)
+                    technical_errors[year] = exc
+                    missing_report[year] = str(exc)
+                    continue
+                year_to_monthly[year] = monthly
+                technical_errors.pop(year, None)
+                if any(value is not None for value in monthly):
+                    missing_report.pop(year, None)
+                else:
+                    missing_report[year] = message
+                if temperature_cache_dir is not None:
+                    _write_temperature_year_cache(
+                        _temperature_year_cache_path(
+                            temperature_cache_dir,
+                            normalized_station_id,
+                            year,
+                        ),
+                        normalized_station_id,
+                        year,
+                        monthly,
+                        message,
+                    )
+
+        rate_limit_delta = provider.rate_limit_events - rate_limit_before
+        next_workers = max(1, workers - 1) if rate_limit_delta or remaining else min(8, workers + 1)
+        adaptive_history.append(
+            {
+                "attempt": attempt,
+                "strategy": "balanced",
+                "used_concurrency": workers,
+                "next_concurrency": next_workers,
+                "rate_limit_events": rate_limit_delta,
+                "failed_years": len(remaining),
+                "years_processed": len(attempt_years),
+                "years_remaining": len(remaining),
+            }
+        )
+        workers = next_workers
+
+    if technical_errors and not year_to_monthly:
+        # A total NOAA failure must be an HTTP/API error, not a plausible all-null data file.
+        for error_type in (NoaaAuthError, NoaaRateLimitError, NoaaTimeoutError, NoaaNetworkError):
+            matching = next(
+                (error for error in technical_errors.values() if isinstance(error, error_type)),
+                None,
+            )
+            if matching is not None:
+                raise matching
+        raise next(iter(technical_errors.values()))
+
+    for year in requested_years:
+        year_to_monthly.setdefault(year, [None] * 12)
+        if not any(value is not None for value in year_to_monthly[year]):
+            missing_report.setdefault(year, "No temperature data")
+
+    final_missing_years = [
+        year for year in requested_years if not any(value is not None for value in year_to_monthly[year])
+    ]
+    return {
+        "station_id": normalized_station_id,
+        "years": requested_years,
+        "months": MONTH_NAMES.copy(),
+        "temperatures": [year_to_monthly[year] for year in requested_years],
+        "final_missing_years": final_missing_years,
+        "missing_data_report": {str(year): missing_report[year] for year in sorted(missing_report)},
+        "token_usage": provider.usage_summary() if provider is not None else {},
+        "adaptive_history": adaptive_history,
+    }
+
+
+def _temperature_method_metadata() -> dict[str, dict[str, Any]]:
+    """Describe reported and derived temperature fields without ambiguity."""
+
+    return {
+        "TMIN": {
+            "field": "tmin",
+            "origin": "NOAA GHCND",
+            "method": "reported_daily_minimum",
+            "description": "Daily minimum temperature reported by NOAA.",
+        },
+        "TAVG": {
+            "field": "tavg",
+            "origin": "NOAA GHCND",
+            "method": "reported_daily_average_source_dependent",
+            "source_dependent": True,
+            "description": (
+                "Daily average temperature reported by NOAA. Its observation or calculation method "
+                "can depend on the contributing source and is not assumed to equal TAXN."
+            ),
+        },
+        "TAXN": {
+            "field": "taxn",
+            "origin": "calculated_by_dane_meteo_stacje",
+            "method": "daily_midrange",
+            "formula": "(TMAX + TMIN) / 2",
+            "requires": ["TMAX", "TMIN"],
+            "description": "Calculated only for days with both valid TMAX and TMIN.",
+        },
+        "TMAX": {
+            "field": "tmax",
+            "origin": "NOAA GHCND",
+            "method": "reported_daily_maximum",
+            "description": "Daily maximum temperature reported by NOAA.",
+        },
+        "AMPLITUDE": {
+            "field": "amplitude",
+            "origin": "calculated_by_dane_meteo_stacje",
+            "method": "daily_temperature_range",
+            "formula": "TMAX - TMIN",
+            "requires": ["TMAX", "TMIN"],
+            "description": "Calculated only for days with both valid TMAX and TMIN.",
+        },
+    }
+
+
+def fetch_station_temperature_capabilities(
+    station_id: str,
+    *,
+    token: str | None = None,
+    token_provider: TokenProvider | None = None,
+    timeout: float = 15,
+    client: NoaaClient | None = None,
+) -> dict[str, Any]:
+    """Return NOAA temperature datatypes advertised for a selected GHCND station."""
+
+    normalized_station_id = _normalize_ghcnd_station_id(station_id)
+    provider = _require_token_provider(token, token_provider)
+    query = urlencode(
+        [
+            ("datasetid", "GHCND"),
+            ("stationid", f"GHCND:{normalized_station_id}"),
+            ("datacategoryid", "TEMP"),
+            ("limit", str(NOAA_PAGE_LIMIT)),
+            ("includemetadata", "true"),
+        ]
+    )
+    payload, _, _, _ = _fetch_noaa_json(
+        f"{NOAA_DATATYPES_ENDPOINT}?{query}",
+        timeout=timeout,
+        client=client or NoaaClient(timeout=timeout),
+        token_provider=provider,
+    )
+    if not isinstance(payload, dict):
+        raise NoaaPayloadError("NOAA datatype response is not an object")
+    raw_results = payload.get("results", [])
+    if not isinstance(raw_results, list):
+        raise NoaaPayloadError("NOAA datatype response does not contain a results array")
+
+    details: list[dict[str, Any]] = []
+    available_ids: set[str] = set()
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        datatype = str(item.get("id", "")).strip().upper()
+        if not datatype:
+            continue
+        available_ids.add(datatype)
+        details.append(
+            {
+                key: item[key]
+                for key in ("id", "name", "mindate", "maxdate", "datacoverage")
+                if key in item
+            }
+        )
+
+    core = [datatype for datatype in CORE_TEMPERATURE_DATATYPES if datatype in available_ids]
+    taxn_available = {"TMIN", "TMAX"}.issubset(available_ids)
+    has_temperature = bool(core)
+    return {
+        "station_id": normalized_station_id,
+        "dataset_id": "GHCND",
+        "available_datatypes": sorted(available_ids),
+        "core_temperature_datatypes": core,
+        "datatype_details": sorted(details, key=lambda item: str(item.get("id", ""))),
+        "derived_datatypes": {
+            "TAXN": taxn_available,
+            "AMPLITUDE": taxn_available,
+        },
+        "export_modes": {
+            "heatmap": bool({"TMIN", "TMAX"}.intersection(available_ids)),
+            "daily": has_temperature,
+            "monthly": has_temperature,
+            "extended": has_temperature,
+        },
+        "temperature_methods": _temperature_method_metadata(),
+    }
+
+
+def _fetch_temperature_records_year(
+    year: int,
+    station_id: str,
+    datatypes: Sequence[str],
+    *,
+    token_provider: TokenProvider,
+    timeout: float,
+    page_limit: int,
+) -> tuple[list[dict[str, Any]], str]:
+    client = NoaaClient(timeout=timeout, max_retries_rate_limit=0)
+    offset = 1
+    records: list[dict[str, Any]] = []
+    total_count: int | None = None
+    query_datatypes = [datatype for datatype in CORE_TEMPERATURE_DATATYPES if datatype in datatypes]
+
+    while True:
+        query_items = [
+            ("datasetid", "GHCND"),
+            ("stationid", f"GHCND:{station_id}"),
+            ("startdate", f"{year}-01-01"),
+            ("enddate", f"{year}-12-31"),
+        ]
+        query_items.extend(("datatypeid", datatype) for datatype in query_datatypes)
+        query_items.extend(
+            [
+                ("units", "metric"),
+                ("limit", str(page_limit)),
+                ("offset", str(offset)),
+                ("includemetadata", "true"),
+            ]
+        )
+        payload, _, _, _ = _fetch_noaa_json(
+            f"{NOAA_DATA_ENDPOINT}?{urlencode(query_items)}",
+            timeout=timeout,
+            client=client,
+            token_provider=token_provider,
+        )
+        if not isinstance(payload, dict):
+            raise NoaaPayloadError("NOAA temperature response is not an object")
+        raw_results = payload.get("results", [])
+        if not isinstance(raw_results, list):
+            raise NoaaPayloadError("NOAA temperature response does not contain a results array")
+        if total_count is None:
+            total_count = _resultset_count(payload)
+        records.extend(item for item in raw_results if isinstance(item, dict))
+
+        received = len(raw_results)
+        if received == 0:
+            break
+        offset += received
+        if total_count is not None and offset > total_count:
+            break
+        if received < page_limit:
+            break
+
+    return records, "OK" if records else "No temperature data"
+
+
+def _temperature_records_cache_path(cache_dir: Path, station_id: str, year: int) -> Path:
+    return cache_dir / "observations" / station_id / f"{year}.json"
+
+
+def _read_temperature_records_cache(
+    cache_path: Path,
+    station_id: str,
+    year: int,
+    datatypes: Sequence[str],
+    *,
+    cache_ttl_seconds: int,
+) -> tuple[list[dict[str, Any]], str] | None:
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        fetched_at = int(payload["fetched_at"])
+        if int(time.time()) - fetched_at > max(cache_ttl_seconds, 0):
+            return None
+        if payload.get("station_id") != station_id or int(payload.get("year")) != year:
+            return None
+        cached_datatypes = {str(value).upper() for value in payload.get("datatypes", [])}
+        if not set(datatypes).issubset(cached_datatypes):
+            return None
+        records = payload.get("records")
+        if not isinstance(records, list) or not all(isinstance(item, dict) for item in records):
+            return None
+        return cast(list[dict[str, Any]], records), str(payload.get("message") or "OK")
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _write_temperature_records_cache(
+    cache_path: Path,
+    station_id: str,
+    year: int,
+    datatypes: Sequence[str],
+    records: list[dict[str, Any]],
+    message: str,
+) -> None:
+    _write_json_atomic(
+        cache_path,
+        {
+            "schema_version": 1,
+            "fetched_at": int(time.time()),
+            "station_id": station_id,
+            "year": year,
+            "datatypes": list(datatypes),
+            "records": records,
+            "message": message,
+        },
+    )
+
+
+def _validate_temperature_year_range(start_year: int, end_year: int) -> None:
+    current_year = time.gmtime().tm_year
+    if start_year < 1763 or end_year > current_year:
+        raise ValueError(f"year range must stay between 1763 and {current_year}")
+    if start_year > end_year:
+        raise ValueError("start_year must be less than or equal to end_year")
+    if end_year - start_year > 150:
+        raise ValueError("year range cannot exceed 151 years")
+
+
+def _fetch_temperature_record_range(
+    station_id: str,
+    start_year: int,
+    end_year: int,
+    datatypes: Sequence[str],
+    *,
+    token: str | None,
+    token_provider: TokenProvider | None,
+    timeout: float,
+    concurrency: int,
+    max_attempts: int,
+    cache_dir: str | Path | None,
+    cache_ttl_seconds: int,
+    refresh: bool,
+) -> tuple[dict[int, list[dict[str, Any]]], dict[int, str], dict[str, int], list[dict[str, Any]]]:
+    requested_years = list(range(start_year, end_year + 1))
+    normalized_datatypes = tuple(
+        datatype for datatype in CORE_TEMPERATURE_DATATYPES if datatype in {value.upper() for value in datatypes}
+    )
+    if not normalized_datatypes:
+        raise ValueError("at least one of TMIN, TAVG or TMAX is required")
+
+    observation_cache_dir = Path(cache_dir) if cache_dir is not None else None
+    year_records: dict[int, list[dict[str, Any]]] = {}
+    missing_report: dict[int, str] = {}
+    remaining: list[int] = []
+    current_year = time.gmtime().tm_year
+    if observation_cache_dir is None or refresh:
+        remaining = requested_years.copy()
+    else:
+        for year in requested_years:
+            year_ttl = min(cache_ttl_seconds, 6 * 60 * 60) if year == current_year else cache_ttl_seconds
+            cached = _read_temperature_records_cache(
+                _temperature_records_cache_path(observation_cache_dir, station_id, year),
+                station_id,
+                year,
+                normalized_datatypes,
+                cache_ttl_seconds=year_ttl,
+            )
+            if cached is None:
+                remaining.append(year)
+                continue
+            records, message = cached
+            year_records[year] = records
+            if not records:
+                missing_report[year] = message
+
+    provider = _require_token_provider(token, token_provider) if remaining else None
+    adaptive_history: list[dict[str, Any]] = []
+    workers = min(max(int(concurrency), 1), 8, max(len(remaining), 1))
+    technical_errors: dict[int, NoaaClientError] = {}
+
+    for attempt in range(1, max(max_attempts, 1) + 1):
+        if not remaining or provider is None:
+            break
+        attempt_years = remaining
+        remaining = []
+        rate_limit_before = provider.rate_limit_events
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="noaa-temperature-export") as executor:
+            futures = {
+                executor.submit(
+                    _fetch_temperature_records_year,
+                    year,
+                    station_id,
+                    normalized_datatypes,
+                    token_provider=provider,
+                    timeout=timeout,
+                    page_limit=NOAA_PAGE_LIMIT,
+                ): year
+                for year in attempt_years
+            }
+            for future in as_completed(futures):
+                year = futures[future]
+                try:
+                    records, message = future.result()
+                except NoaaClientError as exc:
+                    remaining.append(year)
+                    technical_errors[year] = exc
+                    missing_report[year] = str(exc)
+                    continue
+                year_records[year] = records
+                technical_errors.pop(year, None)
+                if records:
+                    missing_report.pop(year, None)
+                else:
+                    missing_report[year] = message
+                if observation_cache_dir is not None:
+                    _write_temperature_records_cache(
+                        _temperature_records_cache_path(observation_cache_dir, station_id, year),
+                        station_id,
+                        year,
+                        normalized_datatypes,
+                        records,
+                        message,
+                    )
+
+        rate_limit_delta = provider.rate_limit_events - rate_limit_before
+        next_workers = max(1, workers - 1) if rate_limit_delta or remaining else min(8, workers + 1)
+        adaptive_history.append(
+            {
+                "attempt": attempt,
+                "strategy": "balanced",
+                "used_concurrency": workers,
+                "next_concurrency": next_workers,
+                "rate_limit_events": rate_limit_delta,
+                "failed_years": len(remaining),
+                "years_processed": len(attempt_years),
+                "years_remaining": len(remaining),
+            }
+        )
+        workers = next_workers
+
+    if technical_errors and not year_records:
+        for error_type in (NoaaAuthError, NoaaRateLimitError, NoaaTimeoutError, NoaaNetworkError):
+            matching = next(
+                (error for error in technical_errors.values() if isinstance(error, error_type)),
+                None,
+            )
+            if matching is not None:
+                raise matching
+        raise next(iter(technical_errors.values()))
+
+    for year in requested_years:
+        year_records.setdefault(year, [])
+        if not year_records[year]:
+            missing_report.setdefault(year, "No temperature data")
+    return (
+        year_records,
+        missing_report,
+        provider.usage_summary() if provider is not None else {},
+        adaptive_history,
+    )
+
+
+def _attribute_metadata(attributes: Any) -> dict[str, str]:
+    parts = attributes.split(",") if isinstance(attributes, str) else []
+    parts.extend([""] * (4 - len(parts)))
+    return {
+        "measurement_flag": parts[0].strip(),
+        "quality_flag": parts[1].strip(),
+        "source_flag": parts[2].strip(),
+        "observation_time": parts[3].strip(),
+    }
+
+
+def _daily_temperature_rows(
+    year: int,
+    records: list[dict[str, Any]],
+    *,
+    final_day: date,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    values: dict[date, dict[str, list[float]]] = {}
+    attributes_by_day: dict[date, dict[str, dict[str, str]]] = {}
+    quality = {
+        "records_received": len(records),
+        "records_used": 0,
+        "records_rejected_quality": 0,
+        "records_rejected_invalid": 0,
+    }
+    for record in records:
+        datatype = str(record.get("datatype", "")).upper()
+        raw_date = record.get("date")
+        if datatype not in CORE_TEMPERATURE_DATATYPES or not isinstance(raw_date, str):
+            quality["records_rejected_invalid"] += 1
+            continue
+        attribute_metadata = _attribute_metadata(record.get("attributes"))
+        if attribute_metadata["quality_flag"]:
+            quality["records_rejected_quality"] += 1
+            continue
+        try:
+            day_date = date.fromisoformat(raw_date[:10])
+            value = float(record["value"])
+        except (KeyError, TypeError, ValueError):
+            quality["records_rejected_invalid"] += 1
+            continue
+        if day_date.year != year or day_date > final_day:
+            quality["records_rejected_invalid"] += 1
+            continue
+        values.setdefault(day_date, {}).setdefault(datatype, []).append(value)
+        attributes_by_day.setdefault(day_date, {})[datatype] = attribute_metadata
+        quality["records_used"] += 1
+
+    first_day = date(year, 1, 1)
+    rows: list[dict[str, Any]] = []
+    day_date = first_day
+    while day_date <= final_day:
+        day_values = values.get(day_date, {})
+
+        tmin = _mean(day_values.get("TMIN", []))
+        tavg = _mean(day_values.get("TAVG", []))
+        tmax = _mean(day_values.get("TMAX", []))
+        taxn = round((tmax + tmin) / 2, 2) if tmin is not None and tmax is not None else None
+        amplitude = round(tmax - tmin, 2) if tmin is not None and tmax is not None else None
+        row: dict[str, Any] = {
+            "date": day_date.isoformat(),
+            "tmin": tmin,
+            "tavg": tavg,
+            "taxn": taxn,
+            "tmax": tmax,
+            "amplitude": amplitude,
+        }
+        day_attributes = attributes_by_day.get(day_date)
+        if day_attributes:
+            row["attributes"] = day_attributes
+        rows.append(row)
+        day_date += timedelta(days=1)
+    return rows, quality
+
+
+def _mean(values: Sequence[float]) -> float | None:
+    return round(sum(values) / len(values), 2) if values else None
+
+
+def _completeness(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    expected = len(rows)
+    result: dict[str, Any] = {"expected_days": expected}
+    for field in ("tmin", "tavg", "taxn", "tmax", "amplitude"):
+        observed = sum(1 for row in rows if isinstance(row.get(field), (int, float)))
+        result[field] = {
+            "observed_days": observed,
+            "missing_days": expected - observed,
+            "percent": round(observed * 100 / expected, 2) if expected else 0.0,
+        }
+    return result
+
+
+def _monthly_temperature_export(
+    station_id: str,
+    years: list[int],
+    rows: list[dict[str, Any]],
+    base: dict[str, Any],
+) -> dict[str, Any]:
+    by_month: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        row_date = date.fromisoformat(str(row["date"]))
+        by_month.setdefault((row_date.year, row_date.month), []).append(row)
+
+    field_map = {
+        "TMIN": "tmin",
+        "TAVG": "tavg",
+        "TAXN": "taxn",
+        "TMAX": "tmax",
+        "AMPLITUDE": "amplitude",
+    }
+    matrices: dict[str, list[list[float | None]]] = {datatype: [] for datatype in field_map}
+    completeness_matrices: dict[str, list[list[float]]] = {datatype: [] for datatype in field_map}
+    expected_days: list[list[int]] = []
+    for year in years:
+        expected_year: list[int] = []
+        values_year: dict[str, list[float | None]] = {datatype: [] for datatype in field_map}
+        completeness_year: dict[str, list[float]] = {datatype: [] for datatype in field_map}
+        for month in range(1, 13):
+            month_rows = by_month.get((year, month), [])
+            expected_year.append(len(month_rows))
+            for datatype, field in field_map.items():
+                values = [float(row[field]) for row in month_rows if isinstance(row.get(field), (int, float))]
+                values_year[datatype].append(_mean(values))
+                completeness_year[datatype].append(
+                    round(len(values) * 100 / len(month_rows), 2) if month_rows else 0.0
+                )
+        expected_days.append(expected_year)
+        for datatype in field_map:
+            matrices[datatype].append(values_year[datatype])
+            completeness_matrices[datatype].append(completeness_year[datatype])
+
+    return {
+        **base,
+        "export_type": "monthly",
+        "station_id": station_id,
+        "years": years,
+        "months": MONTH_NAMES.copy(),
+        "temperatures": matrices,
+        "completeness": {
+            "expected_days": expected_days,
+            "percent": completeness_matrices,
+        },
+    }
+
+
+def _statistic(values: Sequence[float], expected_days: int) -> dict[str, Any]:
+    return {
+        "count": len(values),
+        "completeness_percent": round(len(values) * 100 / expected_days, 2) if expected_days else 0.0,
+        "mean": _mean(values),
+        "minimum": round(min(values), 2) if values else None,
+        "maximum": round(max(values), 2) if values else None,
+    }
+
+
+def _extended_temperature_export(
+    station_id: str,
+    rows: list[dict[str, Any]],
+    base: dict[str, Any],
+) -> dict[str, Any]:
+    by_month: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        row_date = date.fromisoformat(str(row["date"]))
+        by_month.setdefault((row_date.year, row_date.month), []).append(row)
+
+    monthly_statistics: list[dict[str, Any]] = []
+    for (year, month), month_rows in sorted(by_month.items()):
+        expected = len(month_rows)
+        statistics: dict[str, Any] = {}
+        for datatype, field in (
+            ("TMIN", "tmin"),
+            ("TAVG", "tavg"),
+            ("TAXN", "taxn"),
+            ("TMAX", "tmax"),
+            ("AMPLITUDE", "amplitude"),
+        ):
+            values = [float(row[field]) for row in month_rows if isinstance(row.get(field), (int, float))]
+            statistics[datatype] = _statistic(values, expected)
+
+        differences = [
+            float(row["tavg"]) - float(row["taxn"])
+            for row in month_rows
+            if isinstance(row.get("tavg"), (int, float)) and isinstance(row.get("taxn"), (int, float))
+        ]
+        monthly_statistics.append(
+            {
+                "year": year,
+                "month": month,
+                "month_name": MONTH_NAMES[month - 1],
+                "expected_days": expected,
+                "temperatures": statistics,
+                "tavg_taxn_comparison": {
+                    "paired_days": len(differences),
+                    "mean_difference": _mean(differences),
+                    "mean_absolute_difference": _mean([abs(value) for value in differences]),
+                    "maximum_absolute_difference": round(max(map(abs, differences)), 2) if differences else None,
+                },
+            }
+        )
+
+    return {
+        **base,
+        "export_type": "extended",
+        "station_id": station_id,
+        "overall_completeness": _completeness(rows),
+        "monthly_statistics": monthly_statistics,
+    }
+
+
+def fetch_temperature_export(
+    station_id: str,
+    start_year: int,
+    end_year: int,
+    *,
+    mode: str,
+    token: str | None = None,
+    token_provider: TokenProvider | None = None,
+    timeout: float = 30,
+    concurrency: int = 4,
+    max_attempts: int = 2,
+    cache_dir: str | Path | None = None,
+    cache_ttl_seconds: int = 30 * 24 * 60 * 60,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """Build daily, monthly or extended temperature exports with explicit methods."""
+
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in TEMPERATURE_EXPORT_MODES:
+        raise ValueError(f"mode must be one of: {', '.join(TEMPERATURE_EXPORT_MODES)}")
+    normalized_station_id = _normalize_ghcnd_station_id(station_id)
+    _validate_temperature_year_range(start_year, end_year)
+    requested_years = list(range(start_year, end_year + 1))
+    year_records, missing_report, token_usage, adaptive_history = _fetch_temperature_record_range(
+        normalized_station_id,
+        start_year,
+        end_year,
+        CORE_TEMPERATURE_DATATYPES,
+        token=token,
+        token_provider=token_provider,
+        timeout=timeout,
+        concurrency=concurrency,
+        max_attempts=max_attempts,
+        cache_dir=cache_dir,
+        cache_ttl_seconds=cache_ttl_seconds,
+        refresh=refresh,
+    )
+
+    today_parts = time.gmtime()
+    today = date(today_parts.tm_year, today_parts.tm_mon, today_parts.tm_mday)
+    rows: list[dict[str, Any]] = []
+    quality_control = {
+        "records_received": 0,
+        "records_used": 0,
+        "records_rejected_quality": 0,
+        "records_rejected_invalid": 0,
+    }
+    observed_datatypes: set[str] = set()
+    for year in requested_years:
+        final_day = min(date(year, 12, 31), today)
+        year_rows, year_quality = _daily_temperature_rows(year, year_records[year], final_day=final_day)
+        rows.extend(year_rows)
+        for key in quality_control:
+            quality_control[key] += year_quality[key]
+        for row in year_rows:
+            for datatype, field in (("TMIN", "tmin"), ("TAVG", "tavg"), ("TMAX", "tmax")):
+                if isinstance(row.get(field), (int, float)):
+                    observed_datatypes.add(datatype)
+        if not any(
+            isinstance(row.get(field), (int, float))
+            for row in year_rows
+            for field in ("tmin", "tavg", "tmax")
+        ):
+            missing_report.setdefault(year, "No usable temperature data after quality control")
+
+    base = {
+        "schema_version": 1,
+        "dataset_id": "GHCND",
+        "units": "celsius",
+        "period": {
+            "start_date": date(start_year, 1, 1).isoformat(),
+            "end_date": min(date(end_year, 12, 31), today).isoformat(),
+        },
+        "requested_datatypes": list(CORE_TEMPERATURE_DATATYPES),
+        "observed_datatypes": [
+            datatype for datatype in CORE_TEMPERATURE_DATATYPES if datatype in observed_datatypes
+        ],
+        "derived_datatypes": ["TAXN", "AMPLITUDE"],
+        "temperature_methods": _temperature_method_metadata(),
+        "aggregation_methods": {
+            "monthly_mean": "arithmetic_mean_of_available_quality_controlled_daily_values",
+            "completeness_percent": "valid_observed_days / expected_calendar_days * 100",
+            "quality_rule": "records_with_a_non_empty_NOAA_QFLAG_are_excluded",
+        },
+        "quality_control": quality_control,
+        "missing_data_report": {str(year): missing_report[year] for year in sorted(missing_report)},
+        "token_usage": token_usage,
+        "adaptive_history": adaptive_history,
+    }
+    if normalized_mode == "daily":
+        return {
+            **base,
+            "export_type": "daily",
+            "station_id": normalized_station_id,
+            "completeness": _completeness(rows),
+            "data": rows,
+        }
+    if normalized_mode == "monthly":
+        return _monthly_temperature_export(normalized_station_id, requested_years, rows, base)
+    return _extended_temperature_export(normalized_station_id, rows, base)
 
 
 def fetch_stations_with_cache_details(
@@ -729,8 +2096,7 @@ def fetch_stations_with_cache_details(
     remote_token = token or os.getenv("NOAA_TOKEN")
     provider = token_provider
     if provider is None and token is None:
-        env_provider = TokenProvider.from_env()
-        provider = env_provider if env_provider.has_tokens() else None
+        provider = shared_env_token_provider()
     if remote:
         try:
             fetched, remote_meta = fetch_remote_stations(
@@ -785,7 +2151,7 @@ def fetch_stations_with_cache_details(
         if fetched:
             if cache_file is not None:
                 now_ts = int(time.time())
-                cache_file.write_text(json.dumps(fetched, ensure_ascii=False, indent=2), encoding="utf-8")
+                _write_json_atomic(cache_file, fetched)
                 _write_cache_metadata(
                     cache_file,
                     fetched,
@@ -874,9 +2240,9 @@ def export_stations(
         else:
             payload = rows
         if pretty:
-            Path(output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            _write_json_atomic(output_json, payload)
         else:
-            Path(output_json).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            _write_json_atomic(output_json, payload, indent=None)
 
     if output_csv is not None:
         with Path(output_csv).open("w", encoding="utf-8", newline="") as handle:
@@ -897,7 +2263,7 @@ def export_stations(
                         )
                     return
 
-                fieldnames = sorted({key for row in rows for key in row.keys()})
+                fieldnames = sorted({key for row in rows for key in row})
                 writer = csv.DictWriter(handle, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(rows)

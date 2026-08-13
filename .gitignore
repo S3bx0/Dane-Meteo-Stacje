@@ -13,4 +13,5 @@ dist/
 .coverage
 .coverage*
 htmlcov/
+*.log
 SCIAGAWKA_KRAJE_EUROPA.md

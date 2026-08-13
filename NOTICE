@@ -12,7 +12,16 @@ Dane Meteo Stacje - NOTICE
 
 3. Zaleznosci zewnetrzne
 - requests (Python HTTP library), licencja Apache-2.0.
+- Leaflet 1.9.4 (interaktywna mapa), licencja BSD-2-Clause.
+  Pelny tekst licencji: dane_meteo_stacje/static/vendor/leaflet/LICENSE.
+- Leaflet.markercluster 1.4.1 (grupowanie punktow), licencja MIT.
+  Pelny tekst licencji: dane_meteo_stacje/static/vendor/leaflet-markercluster/LICENSE.
 
-4. Uwaga praktyczna
+4. Podklad mapowy OpenStreetMap
+- Kafelki i dane mapowe sa dostarczane przez OpenStreetMap contributors.
+- Attribution i warunki: https://www.openstreetmap.org/copyright
+- Polityka publicznego serwera kafelkow: https://operations.osmfoundation.org/policies/tiles/
+
+5. Uwaga praktyczna
 - Licencja kodu projektu (MIT) nie zmienia warunkow korzystania z API NOAA.
-- Uzytkownik odpowiada za zgodnosc ze stawkami limitow, politykami API i aktualnymi warunkami publikowanymi przez dostawce danych.
+- Uzytkownik odpowiada za zgodnosc ze stawkami limitow, politykami API i aktualnymi warunkami publikowanymi przez dostawcow danych.

@@ -74,7 +74,7 @@ OPENAPI_DOCUMENT: dict[str, Any] = {
                 "summary": "Application readiness check",
                 "responses": {
                     "200": _json_response("Application is ready", HEALTH_SCHEMA),
-                    "503": _json_response("Application is not ready", ERROR_SCHEMA),
+                    "503": _json_response("Application is not ready", HEALTH_SCHEMA),
                 },
             }
         },
@@ -106,7 +106,61 @@ OPENAPI_DOCUMENT: dict[str, Any] = {
                         "Station results", {"$ref": "#/components/schemas/SearchResponse"}
                     ),
                     "400": _json_response("Invalid request", ERROR_SCHEMA),
+                    "403": _json_response("Foreign Origin", ERROR_SCHEMA),
                     "413": _json_response("Payload too large", ERROR_SCHEMA),
+                    "415": _json_response("JSON Content-Type required", ERROR_SCHEMA),
+                    "502": _json_response("NOAA failure", ERROR_SCHEMA),
+                    "503": _json_response("Server busy", ERROR_SCHEMA),
+                    "504": _json_response("NOAA deadline exceeded", ERROR_SCHEMA),
+                },
+            }
+        },
+        "/api/temperature-capabilities": {
+            "post": {
+                "summary": "Discover temperature datatypes for a GHCND station",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/TemperatureCapabilitiesRequest"}
+                        }
+                    },
+                },
+                "responses": {
+                    "200": _json_response(
+                        "Reported and derived station temperature datatypes",
+                        {"$ref": "#/components/schemas/TemperatureCapabilitiesResponse"},
+                    ),
+                    "400": _json_response("Invalid request", ERROR_SCHEMA),
+                    "403": _json_response("Foreign Origin", ERROR_SCHEMA),
+                    "413": _json_response("Payload too large", ERROR_SCHEMA),
+                    "415": _json_response("JSON Content-Type required", ERROR_SCHEMA),
+                    "502": _json_response("NOAA failure", ERROR_SCHEMA),
+                    "503": _json_response("Server busy", ERROR_SCHEMA),
+                    "504": _json_response("NOAA deadline exceeded", ERROR_SCHEMA),
+                },
+            }
+        },
+        "/api/temperatures": {
+            "post": {
+                "summary": "Download Heatmap, daily, monthly or extended temperatures",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/TemperatureRequest"}
+                        }
+                    },
+                },
+                "responses": {
+                    "200": _json_response(
+                        "Requested temperature export",
+                        {"$ref": "#/components/schemas/TemperatureResponse"},
+                    ),
+                    "400": _json_response("Invalid request", ERROR_SCHEMA),
+                    "403": _json_response("Foreign Origin", ERROR_SCHEMA),
+                    "413": _json_response("Payload too large", ERROR_SCHEMA),
+                    "415": _json_response("JSON Content-Type required", ERROR_SCHEMA),
                     "502": _json_response("NOAA failure", ERROR_SCHEMA),
                     "503": _json_response("Server busy", ERROR_SCHEMA),
                     "504": _json_response("NOAA deadline exceeded", ERROR_SCHEMA),
@@ -119,7 +173,9 @@ OPENAPI_DOCUMENT: dict[str, Any] = {
                 "responses": {
                     "200": {"description": "Downloadable JSON or CSV document"},
                     "400": _json_response("Invalid request", ERROR_SCHEMA),
+                    "403": _json_response("Foreign Origin", ERROR_SCHEMA),
                     "413": _json_response("Payload too large", ERROR_SCHEMA),
+                    "415": _json_response("JSON Content-Type required", ERROR_SCHEMA),
                 },
             }
         },
@@ -140,6 +196,10 @@ OPENAPI_DOCUMENT: dict[str, Any] = {
                     "country": {"type": "string"},
                     "latitude": {"type": "number"},
                     "longitude": {"type": "number"},
+                    "mindate": {"type": "string", "format": "date"},
+                    "maxdate": {"type": "string", "format": "date"},
+                    "elevation": {"type": "number"},
+                    "datacoverage": {"type": "number"},
                 },
             },
             "SearchRequest": {
@@ -171,6 +231,100 @@ OPENAPI_DOCUMENT: dict[str, Any] = {
                     },
                     "source": {"type": "string"},
                     "metadata": {"type": "object"},
+                    "request_id": {"$ref": "#/components/schemas/RequestId"},
+                },
+            },
+            "TemperatureRequest": {
+                "type": "object",
+                "required": ["station_id", "start_year", "end_year"],
+                "additionalProperties": False,
+                "properties": {
+                    "station_id": {"type": "string", "minLength": 1},
+                    "start_year": {"type": "integer", "minimum": 1763},
+                    "end_year": {"type": "integer", "minimum": 1763},
+                    "mode": {"enum": ["heatmap", "daily", "monthly", "extended"], "default": "heatmap"},
+                },
+            },
+            "TemperatureCapabilitiesRequest": {
+                "type": "object",
+                "required": ["station_id"],
+                "additionalProperties": False,
+                "properties": {"station_id": {"type": "string", "minLength": 1}},
+            },
+            "TemperatureCapabilities": {
+                "type": "object",
+                "required": [
+                    "station_id",
+                    "dataset_id",
+                    "available_datatypes",
+                    "core_temperature_datatypes",
+                    "derived_datatypes",
+                    "export_modes",
+                    "temperature_methods",
+                ],
+                "additionalProperties": True,
+                "properties": {
+                    "station_id": {"type": "string"},
+                    "dataset_id": {"const": "GHCND"},
+                    "available_datatypes": {"type": "array", "items": {"type": "string"}},
+                    "core_temperature_datatypes": {"type": "array", "items": {"type": "string"}},
+                    "derived_datatypes": {"type": "object", "additionalProperties": {"type": "boolean"}},
+                    "export_modes": {"type": "object", "additionalProperties": {"type": "boolean"}},
+                    "temperature_methods": {"type": "object"},
+                },
+            },
+            "TemperatureCapabilitiesResponse": {
+                "type": "object",
+                "required": ["data", "request_id"],
+                "additionalProperties": False,
+                "properties": {
+                    "data": {"$ref": "#/components/schemas/TemperatureCapabilities"},
+                    "request_id": {"$ref": "#/components/schemas/RequestId"},
+                },
+            },
+            "TemperatureMatrix": {
+                "type": "object",
+                "required": [
+                    "station_id",
+                    "years",
+                    "months",
+                    "temperatures",
+                    "final_missing_years",
+                    "missing_data_report",
+                    "token_usage",
+                    "adaptive_history",
+                ],
+                "additionalProperties": False,
+                "properties": {
+                    "station_id": {"type": "string"},
+                    "years": {"type": "array", "items": {"type": "integer"}},
+                    "months": {"type": "array", "items": {"type": "string"}},
+                    "temperatures": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": ["number", "null"]},
+                            "minItems": 12,
+                            "maxItems": 12,
+                        },
+                    },
+                    "final_missing_years": {"type": "array", "items": {"type": "integer"}},
+                    "missing_data_report": {"type": "object"},
+                    "token_usage": {"type": "object"},
+                    "adaptive_history": {"type": "array", "items": {"type": "object"}},
+                },
+            },
+            "TemperatureResponse": {
+                "type": "object",
+                "required": ["data", "request_id"],
+                "additionalProperties": False,
+                "properties": {
+                    "data": {
+                        "anyOf": [
+                            {"$ref": "#/components/schemas/TemperatureMatrix"},
+                            {"type": "object", "additionalProperties": True},
+                        ]
+                    },
                     "request_id": {"$ref": "#/components/schemas/RequestId"},
                 },
             },

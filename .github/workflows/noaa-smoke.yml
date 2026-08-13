@@ -40,21 +40,33 @@ jobs:
             exit 1
           fi
 
-      - name: Fetch one NOAA station
+      - name: Verify country search and Heatmap JSON
         shell: bash
         run: |
           python - <<'PY'
-          from dane_meteo_stacje.data import fetch_stations_with_cache_details
-
-          result = fetch_stations_with_cache_details(
-              remote_url=(
-                  "https://www.ncei.noaa.gov/cdo-web/api/v2/stations"
-                  "?locationid=FIPS:PL&limit=1"
-              ),
-              refresh=True,
+          from dane_meteo_stacje.data import (
+              fetch_monthly_temperature_matrix,
+              fetch_stations_for_country,
           )
-          if result.source != "remote" or not result.stations:
-              raise SystemExit("::error::NOAA smoke did not return a remote station.")
 
-          print(f"NOAA smoke passed: source={result.source}, stations={len(result.stations)}")
+          result = fetch_stations_for_country("Poland", timeout=30)
+          if result.source != "noaa-country" or not result.stations:
+              raise SystemExit("::error::NOAA country search did not return stations.")
+
+          heatmap = fetch_monthly_temperature_matrix(
+              "PLM00012295",
+              2020,
+              2020,
+              timeout=30,
+              concurrency=1,
+              max_attempts=1,
+          )
+          if heatmap["years"] != [2020] or len(heatmap["temperatures"][0]) != 12:
+              raise SystemExit("::error::NOAA Heatmap export has an invalid shape.")
+
+          print(
+              "NOAA smoke passed: "
+              f"source={result.source}, stations={len(result.stations)}, "
+              f"temperature_years={heatmap['years']}"
+          )
           PY
