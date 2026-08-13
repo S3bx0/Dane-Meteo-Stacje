@@ -199,9 +199,37 @@ kliknięcie punktu wybiera tę samą stację do eksportu temperatur. Wybranie wi
 przenosi mapę do stacji i otwiera jej opis. Przyciski pozwalają ponownie dopasować stacje
 albo wrócić do widoku całego świata.
 
+Po wyszukaniu kraju aplikacja pobiera jego uproszczoną granicę OpenStreetMap i nakłada
+na mapę delikatne niebieskie wypełnienie o kryciu 12%. Geometria jest pobierana przez
+lokalny backend tylko na żądanie użytkownika, ograniczona do jednego zapytania na sekundę
+i przechowywana przez 30 dni w prywatnym cache. Adres usługi można zmienić zmienną
+`DANE_METEO_NOMINATIM_URL` bez modyfikowania aplikacji.
+
 Biblioteki Leaflet i Leaflet.markercluster są dostarczane lokalnie wraz z aplikacją i nie
 wymagają zewnętrznego CDN. Kafelki OpenStreetMap są pobierane wyłącznie dla aktualnie
 widocznego obszaru, dlatego szczegółowy podkład mapy wymaga połączenia z internetem.
+
+Każda stacja otrzymuje ocenę **dobra**, **średnia** albo **słaba**. Ocena wstępna
+wykorzystuje kompletność katalogową NOAA, długość i aktualność okresu danych. Po
+sprawdzeniu stacji jest przeliczana z uwzględnieniem faktycznej dostępności
+`TMIN`, `TAVG` i `TMAX`; znak `✓` przy etykiecie oznacza ocenę potwierdzoną.
+Wyniki można ograniczyć minimalną liczbą lat, minimalną kompletnością lub kategorią
+jakości. Przycisk **Wybierz najlepszą stację** sprawdza typy temperatury pięciu
+najlepszych kandydatów i wybiera najwyżej ocenioną stację.
+
+Po wybraniu stacji GUI pobiera miesięczny podgląd z ostatnich 1, 3, 5 albo 10 pełnych
+lat. Pokazuje wykresy `TMIN`/`TAVG`/`TMAX` i amplitudy `TMAX − TMIN`, liczbę
+brakujących dni dla każdego typu, lata o kompletności poniżej 90% oraz porównanie
+jakości czterech najbliższych stacji. Podgląd nie tworzy pliku; eksport JSON jest nadal
+oddzielną, świadomą operacją użytkownika.
+
+Przyciskiem **Porównaj** w tabeli, oknie mapy lub zestawieniu pobliskich stacji można
+dodać od 2 do 5 pozycji do wspólnej analizy. Program automatycznie wyznacza część
+zakresów lat dostępną dla wszystkich stacji i pobiera identyczny okres. Panel porównania
+zawiera wspólny wykres `TMIN`, `TAVG` albo `TMAX`, średnie temperatury, różnice względem
+pierwszej (bazowej) stacji, kompletność i braki, ranking jakości oraz pełną macierz
+odległości. Zmiana parametru wykresu korzysta z już pobranych danych; zmiana liczby lat
+odświeża wspólny zakres z NOAA.
 
 GUI udostępnia również trzy nowe eksporty:
 

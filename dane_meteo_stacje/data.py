@@ -11,7 +11,7 @@ import re
 import socket
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -117,8 +117,113 @@ class StationRecord(TypedDict):
     mindate: NotRequired[str]
     maxdate: NotRequired[str]
     datacoverage: NotRequired[float]
+    quality: NotRequired[dict[str, Any]]
     source: NotRequired[str]
     notes: NotRequired[str]
+
+
+def station_quality_summary(
+    station: Mapping[str, Any],
+    *,
+    available_datatypes: Sequence[str] | None = None,
+    reference_date: date | None = None,
+) -> dict[str, Any]:
+    """Score station suitability without requiring a bulk NOAA datatype scan.
+
+    Catalogue-only scores use coverage, observation span and recency.  When
+    ``available_datatypes`` is supplied, fifteen points are reserved for
+    verified TMIN/TAVG/TMAX availability and the assessment becomes verified.
+    """
+
+    try:
+        raw_coverage = float(station.get("datacoverage", 0.0))
+    except (TypeError, ValueError):
+        raw_coverage = 0.0
+    coverage = min(1.0, max(0.0, raw_coverage / 100 if raw_coverage > 1 else raw_coverage))
+
+    def parse_catalogue_date(key: str) -> date | None:
+        raw_value = station.get(key)
+        if not isinstance(raw_value, str):
+            return None
+        try:
+            return date.fromisoformat(raw_value[:10])
+        except ValueError:
+            return None
+
+    start_date = parse_catalogue_date("mindate")
+    end_date = parse_catalogue_date("maxdate")
+    if start_date is not None and end_date is not None and end_date >= start_date:
+        period_years = round((end_date - start_date).days / 365.2425, 1)
+    else:
+        period_years = 0.0
+
+    today = reference_date or date.today()
+    recency_years = max(0, today.year - end_date.year) if end_date is not None else None
+    if recency_years is None:
+        recency_points = 0.0
+    elif recency_years <= 2:
+        recency_points = 10.0
+    elif recency_years <= 5:
+        recency_points = 7.0
+    elif recency_years <= 10:
+        recency_points = 3.0
+    else:
+        recency_points = 0.0
+
+    verified = available_datatypes is not None
+    normalized_datatypes = {
+        str(datatype).strip().upper()
+        for datatype in (available_datatypes or [])
+        if str(datatype).strip()
+    }
+    if verified:
+        coverage_points = coverage * 50
+        period_points = min(period_years / 50, 1.0) * 25
+        datatype_points = sum(5 for datatype in CORE_TEMPERATURE_DATATYPES if datatype in normalized_datatypes)
+    else:
+        coverage_points = coverage * 60
+        period_points = min(period_years / 50, 1.0) * 30
+        datatype_points = None
+
+    score = round(coverage_points + period_points + recency_points + (datatype_points or 0))
+    if score >= 75 and coverage >= 0.75 and period_years >= 20:
+        grade = "good"
+        label = "dobra"
+    elif score >= 45 and coverage >= 0.4 and period_years >= 5:
+        grade = "medium"
+        label = "średnia"
+    else:
+        grade = "weak"
+        label = "słaba"
+
+    reasons = [
+        f"kompletność katalogowa {coverage * 100:.1f}%",
+        f"okres danych {period_years:.1f} lat",
+        "aktualne dane" if recency_years is not None and recency_years <= 2 else "starsze lub nieznane dane końcowe",
+    ]
+    if verified:
+        core_labels = [datatype for datatype in CORE_TEMPERATURE_DATATYPES if datatype in normalized_datatypes]
+        reasons.append(f"potwierdzone typy: {', '.join(core_labels) if core_labels else 'brak'}")
+
+    return {
+        "score": score,
+        "grade": grade,
+        "label": label,
+        "assessment": "verified" if verified else "catalogue",
+        "coverage_percent": round(coverage * 100, 1),
+        "period_years": period_years,
+        "recency_years": recency_years,
+        "available_datatypes": [
+            datatype for datatype in CORE_TEMPERATURE_DATATYPES if datatype in normalized_datatypes
+        ],
+        "components": {
+            "coverage": round(coverage_points, 1),
+            "period": round(period_points, 1),
+            "recency": round(recency_points, 1),
+            "datatypes": datatype_points,
+        },
+        "reasons": reasons,
+    }
 
 
 def private_env_file_path() -> Path:

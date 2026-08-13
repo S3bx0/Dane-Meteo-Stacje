@@ -18,6 +18,7 @@ def test_openapi_contract_is_versioned_and_covers_all_http_routes():
         "/health/ready",
         "/metrics",
         "/openapi.json",
+        "/api/country-boundary",
         "/api/search",
         "/api/temperature-capabilities",
         "/api/temperatures",

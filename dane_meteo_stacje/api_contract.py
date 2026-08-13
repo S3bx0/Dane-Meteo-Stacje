@@ -115,6 +115,28 @@ OPENAPI_DOCUMENT: dict[str, Any] = {
                 },
             }
         },
+        "/api/country-boundary": {
+            "post": {
+                "summary": "Get a cached OpenStreetMap boundary for a selected country",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/CountryBoundaryRequest"}
+                        }
+                    },
+                },
+                "responses": {
+                    "200": _json_response(
+                        "Country GeoJSON boundary",
+                        {"$ref": "#/components/schemas/CountryBoundaryResponse"},
+                    ),
+                    "400": _json_response("Invalid country", ERROR_SCHEMA),
+                    "403": _json_response("Foreign Origin", ERROR_SCHEMA),
+                    "502": _json_response("Boundary provider failure", ERROR_SCHEMA),
+                },
+            }
+        },
         "/api/temperature-capabilities": {
             "post": {
                 "summary": "Discover temperature datatypes for a GHCND station",
@@ -200,6 +222,30 @@ OPENAPI_DOCUMENT: dict[str, Any] = {
                     "maxdate": {"type": "string", "format": "date"},
                     "elevation": {"type": "number"},
                     "datacoverage": {"type": "number"},
+                    "quality": {
+                        "type": "object",
+                        "required": [
+                            "score",
+                            "grade",
+                            "label",
+                            "assessment",
+                            "coverage_percent",
+                            "period_years",
+                        ],
+                        "additionalProperties": True,
+                        "properties": {
+                            "score": {"type": "integer", "minimum": 0, "maximum": 100},
+                            "grade": {"enum": ["good", "medium", "weak"]},
+                            "label": {"type": "string"},
+                            "assessment": {"enum": ["catalogue", "verified"]},
+                            "coverage_percent": {"type": "number", "minimum": 0, "maximum": 100},
+                            "period_years": {"type": "number", "minimum": 0},
+                            "available_datatypes": {
+                                "type": "array",
+                                "items": {"enum": ["TMIN", "TAVG", "TMAX"]},
+                            },
+                        },
+                    },
                 },
             },
             "SearchRequest": {
@@ -231,6 +277,37 @@ OPENAPI_DOCUMENT: dict[str, Any] = {
                     },
                     "source": {"type": "string"},
                     "metadata": {"type": "object"},
+                    "request_id": {"$ref": "#/components/schemas/RequestId"},
+                },
+            },
+            "CountryBoundaryRequest": {
+                "type": "object",
+                "required": ["country"],
+                "additionalProperties": False,
+                "properties": {"country": {"type": "string", "minLength": 1}},
+            },
+            "CountryBoundaryResponse": {
+                "type": "object",
+                "required": ["data", "source", "request_id"],
+                "additionalProperties": False,
+                "properties": {
+                    "data": {
+                        "type": "object",
+                        "required": ["type", "properties", "geometry"],
+                        "properties": {
+                            "type": {"const": "Feature"},
+                            "properties": {"type": "object"},
+                            "geometry": {
+                                "type": "object",
+                                "required": ["type", "coordinates"],
+                                "properties": {
+                                    "type": {"enum": ["Polygon", "MultiPolygon"]},
+                                    "coordinates": {"type": "array"},
+                                },
+                            },
+                        },
+                    },
+                    "source": {"enum": ["cache", "cache-stale", "nominatim"]},
                     "request_id": {"$ref": "#/components/schemas/RequestId"},
                 },
             },

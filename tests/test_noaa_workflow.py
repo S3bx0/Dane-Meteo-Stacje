@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import date
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -16,6 +17,7 @@ from dane_meteo_stacje.data import (
     fetch_station_temperature_capabilities,
     fetch_stations_for_country,
     fetch_temperature_export,
+    station_quality_summary,
 )
 
 
@@ -38,6 +40,42 @@ class StationPagesClient:
             200,
             {"etag": "", "last_modified": ""},
         )
+
+
+def test_station_quality_scores_catalogue_and_verified_temperature_types():
+    station = {
+        "station_id": "GHCND:TEST",
+        "datacoverage": 0.95,
+        "mindate": "1980-01-01",
+        "maxdate": "2025-12-31",
+    }
+
+    catalogue = station_quality_summary(station, reference_date=date(2026, 8, 13))
+    verified = station_quality_summary(
+        station,
+        available_datatypes=["TMIN", "TAVG", "TMAX"],
+        reference_date=date(2026, 8, 13),
+    )
+
+    assert catalogue["grade"] == "good"
+    assert catalogue["assessment"] == "catalogue"
+    assert catalogue["coverage_percent"] == 95.0
+    assert catalogue["period_years"] == 46.0
+    assert catalogue["components"]["datatypes"] is None
+    assert verified["assessment"] == "verified"
+    assert verified["components"]["datatypes"] == 15
+    assert verified["available_datatypes"] == ["TMIN", "TAVG", "TMAX"]
+
+
+def test_station_quality_marks_short_incomplete_station_as_weak():
+    quality = station_quality_summary(
+        {"datacoverage": 0.25, "mindate": "2022-01-01", "maxdate": "2025-12-31"},
+        available_datatypes=["TMIN"],
+        reference_date=date(2026, 8, 13),
+    )
+
+    assert quality["grade"] == "weak"
+    assert quality["score"] < 45
 
 
 def test_country_search_builds_noaa_location_query_and_follows_pagination():

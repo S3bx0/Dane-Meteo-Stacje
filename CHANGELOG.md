@@ -11,6 +11,16 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
   stacji z mapy i automatycznym przybliżeniem do jej współrzędnych.
 - Automatyczny, atomowy cache katalogów krajów i rocznych danych temperatur.
 - Zakres danych i pokrycie stacji w tabeli oraz stronicowanie dużych wyników.
+- Ocena jakości stacji (dobra, średnia, słaba) uwzględniająca kompletność, długość
+  okresu, aktualność oraz potwierdzone typy TMIN/TAVG/TMAX; filtry jakości i automatyczny
+  wybór najlepszego kandydata.
+- Podgląd ostatnich 1–10 lat przed eksportem: wykres TMIN/TAVG/TMAX, amplituda,
+  brakujące dni, niepełne lata oraz porównanie najbliższych stacji.
+- Porównywanie 2–5 stacji we wspólnym zakresie lat: wykres wybranego typu temperatury,
+  średnie i różnice względem stacji bazowej, kompletność, braki, ranking jakości oraz
+  macierz odległości geograficznych.
+- Delikatne niebieskie podświetlenie obszaru wybranego kraju po jego granicach OSM,
+  z 12% kryciem i 30-dniowym lokalnym cache geometrii.
 - Automatyczne wykrywanie typów temperatury dostępnych dla wybranej stacji NOAA.
 - Eksporty dzienne, miesięczne i rozszerzone z osobnym `TAVG`, obliczanym `TAXN`,
   amplitudą, kompletnością oraz metadanymi metody obliczenia.
@@ -20,6 +30,8 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
 - Mapa ładuje od razu kafelki docelowego kraju lub stacji, bez wcześniejszego pobierania
   widoku świata i bez kosztownych animacji pośrednich; połączenie z serwerem kafelków jest
   zestawiane wcześniej, a aktualizacje podczas zoomu są odroczone do końcowego widoku.
+- Znaczniki i klastry mapy pokazują jakość stacji kolorami, a legenda podaje liczby
+  dobrych, średnich i słabych stacji po zastosowaniu filtrów.
 - Schematyczne wielokąty kontynentów zastąpiono prawdziwym podkładem mapowym z nazwami,
   drogami i granicami państw; biblioteki mapy są dostarczane lokalnie z aplikacją.
 - Trwała rotacja wszystkich tokenów NOAA, ograniczanie tempa i cache zachowywane między żądaniami.
