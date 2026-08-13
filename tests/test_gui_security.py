@@ -88,6 +88,41 @@ def test_search_endpoint_rejects_non_noaa_remote_url(gui_server):
     assert payload["code"] == "BAD_REQUEST"
 
 
+def test_api_rejects_non_json_content_type(gui_server):
+    host, port = gui_server
+    connection = http.client.HTTPConnection(host, port)
+    connection.request("POST", "/api/search", body="{}", headers={"Content-Type": "text/plain"})
+
+    response = connection.getresponse()
+    payload = json.loads(response.read())
+    connection.close()
+
+    assert response.status == 415
+    assert payload["code"] == "UNSUPPORTED_MEDIA_TYPE"
+
+
+def test_api_rejects_foreign_origin_and_accepts_same_origin(gui_server):
+    host, port = gui_server
+    for origin, expected_status in [
+        ("https://attacker.example", 403),
+        (f"http://127.0.0.1:{port}", 200),
+    ]:
+        connection = http.client.HTTPConnection(host, port)
+        connection.request(
+            "POST",
+            "/api/export",
+            body=json.dumps({"format": "json", "rows": []}),
+            headers={"Content-Type": "application/json", "Origin": origin},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        connection.close()
+
+        assert response.status == expected_status
+        if expected_status == 403:
+            assert payload["code"] == "FORBIDDEN_ORIGIN"
+
+
 def test_search_endpoint_rejects_oversized_body(gui_server):
     host, port = gui_server
     connection = http.client.HTTPConnection(host, port)
@@ -119,6 +154,6 @@ def test_all_response_types_include_security_headers(gui_server):
         connection.close()
 
         assert headers["x-content-type-options"] == "nosniff"
-        assert headers["referrer-policy"] == "no-referrer"
+        assert headers["referrer-policy"] == "strict-origin-when-cross-origin"
         assert headers["permissions-policy"] == "camera=(), geolocation=(), microphone=()"
         assert "frame-ancestors 'none'" in headers["content-security-policy"]

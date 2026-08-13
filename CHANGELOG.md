@@ -5,6 +5,39 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Interaktywna mapa Leaflet z podkładem OpenStreetMap, grupowaniem znaczników, wyborem
+  stacji z mapy i automatycznym przybliżeniem do jej współrzędnych.
+- Automatyczny, atomowy cache katalogów krajów i rocznych danych temperatur.
+- Zakres danych i pokrycie stacji w tabeli oraz stronicowanie dużych wyników.
+- Automatyczne wykrywanie typów temperatury dostępnych dla wybranej stacji NOAA.
+- Eksporty dzienne, miesięczne i rozszerzone z osobnym `TAVG`, obliczanym `TAXN`,
+  amplitudą, kompletnością oraz metadanymi metody obliczenia.
+
+### Changed
+
+- Mapa ładuje od razu kafelki docelowego kraju lub stacji, bez wcześniejszego pobierania
+  widoku świata i bez kosztownych animacji pośrednich; połączenie z serwerem kafelków jest
+  zestawiane wcześniej, a aktualizacje podczas zoomu są odroczone do końcowego widoku.
+- Schematyczne wielokąty kontynentów zastąpiono prawdziwym podkładem mapowym z nazwami,
+  drogami i granicami państw; biblioteki mapy są dostarczane lokalnie z aplikacją.
+- Trwała rotacja wszystkich tokenów NOAA, ograniczanie tempa i cache zachowywane między żądaniami.
+- Eksport temperatur używa nazwy miasta zgodnej z konwencją Heatmapy.
+- Lista krajów GUI jest generowana z mapowania obsługiwanego przez backend.
+- Dotychczasowy JSON Heatmapy pozostaje domyślnym trybem zgodności wstecznej.
+
+### Fixed
+
+- Całkowita awaria NOAA zwraca błąd zamiast pozornie poprawnej macierzy pełnej `null`.
+- Odrzucanie obserwacji temperatur oznaczonych przez NOAA flagą kontroli jakości.
+- Test E2E używa aktualnej etykiety pola wyszukiwania.
+
+### Security
+
+- Domyślny plik tokenów przeniesiono do `%LOCALAPPDATA%\\Dane-Meteo-Stacje\\.env`.
+- Lokalne API wymaga JSON, sprawdza `Origin` i domyślnie nie pozwala wystawić GUI poza loopback.
+
 ## [0.1.1] - 2026-08-10
 
 ### Added

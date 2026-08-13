@@ -19,6 +19,8 @@ def test_openapi_contract_is_versioned_and_covers_all_http_routes():
         "/metrics",
         "/openapi.json",
         "/api/search",
+        "/api/temperature-capabilities",
+        "/api/temperatures",
         "/api/export",
     }
     assert "504" in OPENAPI_DOCUMENT["paths"]["/api/search"]["post"]["responses"]

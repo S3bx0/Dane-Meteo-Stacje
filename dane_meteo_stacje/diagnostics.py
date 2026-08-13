@@ -12,7 +12,12 @@ from .data import (
 
 def render_fetch_error(exc: NoaaClientError) -> str:
     if isinstance(exc, NoaaAuthError):
-        return "NOAA auth error: sprawdź token (NOAA_TOKEN) lub uprawnienia."
+        return (
+            "NOAA auth error: lokalny token nie jest ustawiony albo został odrzucony. "
+            "Sekrety GitHub Actions nie są przekazywane do localhost; ustaw NOAA_API_TOKENS, "
+            "NOAA_TOKENS lub NOAA_TOKEN w prywatnym pliku "
+            "%LOCALAPPDATA%\\Dane-Meteo-Stacje\\.env albo środowisku lokalnego procesu."
+        )
     if isinstance(exc, NoaaRateLimitError):
         return "NOAA rate limit: przekroczono limit zapytań (HTTP 429)."
     if isinstance(exc, NoaaPayloadError):

@@ -46,13 +46,40 @@ dane-meteo-stacje-gui
 dane-meteo-stacje-gui --log-level DEBUG
 ```
 
+W GUI wpisanie kraju (np. `Poland` albo `Polska`) automatycznie buduje zapytanie
+NOAA GHCND z `locationid=FIPS:PL` i pobiera wszystkie strony katalogu stacji.
+Po wybraniu stacji można podać pierwszy i ostatni rok oraz pobrać JSON zgodny z
+Heatmapą (`years`, `months`, macierz `temperatures`, raport braków i statystyki
+wykorzystania zamaskowanych tokenów).
+
+Do rzeczywistego wyszukiwania i pobierania temperatur proces GUI musi otrzymać
+co najmniej jeden token przez `NOAA_API_TOKENS`, `NOAA_TOKENS` albo `NOAA_TOKEN`.
+GitHub Actions przekazuje sekret `NOAA_API_TOKENS` tylko wewnątrz workflowu;
+lokalne uruchomienie wymaga ustawienia tej samej zmiennej w środowisku procesu.
+
+Najbezpieczniej przechowywać tokeny poza repozytorium, w prywatnym pliku użytkownika
+`%LOCALAPPDATA%\Dane-Meteo-Stacje\.env`:
+
+```powershell
+$tokenDir = Join-Path $env:LOCALAPPDATA "Dane-Meteo-Stacje"
+New-Item -ItemType Directory -Force $tokenDir
+Copy-Item .env.example (Join-Path $tokenDir ".env")
+```
+
+Następnie wpisz tokeny po znaku `=`. Program automatycznie wczytuje zmiany bez
+restartu. Można wskazać inną lokalizację przez `DANE_METEO_ENV_FILE`. Dla zgodności
+wstecznej obsługiwany jest też `.env` w katalogu aplikacji, ale na dysku sieciowym
+nie jest on zalecany. Żadnego pliku z tokenami nie wolno commitować ani wysyłać do
+GitHuba. Zmienne procesu mają pierwszeństwo przed wartościami z pliku.
+
 Ze wzgledow bezpieczenstwa pole `Remote URL` w GUI akceptuje wylacznie adresy HTTPS
 w domenie `noaa.gov`. Interfejs CLI obsluguje tez zewnetrzne zrodla JSON podane przez
 `--remote-url`, ale wymaga HTTPS i publicznych adresow sieciowych. Kazde przekierowanie
 jest ponownie sprawdzane, a token NOAA nigdy nie jest wysylany poza domene `noaa.gov`.
-Pole `Cache File` w GUI przyjmuje tylko nazwe pliku z rozszerzeniem `.json`; plik jest
-przechowywany w `~/.cache/dane-meteo-stacje`. CLI nadal pozwala jawnie wskazac lokalna
-sciezke cache argumentem `--cache`.
+Pole `Cache File` w GUI przyjmuje tylko nazwe pliku z rozszerzeniem `.json`; plik oraz
+automatyczne cache katalogu krajów i temperatur są przechowywane w prywatnym katalogu
+`%LOCALAPPDATA%\Dane-Meteo-Stacje\cache`. Zapisy cache są atomowe. CLI nadal pozwala
+jawnie wskazać lokalną ścieżkę cache argumentem `--cache`.
 
 GUI zapisuje logi operacyjne jako pojedyncze obiekty JSON. Kazda odpowiedz API zawiera
 ten sam identyfikator korelacyjny w polu `request_id` i naglowku `X-Request-ID`, co pozwala
@@ -158,13 +185,39 @@ W trybie --verbose pojawia się też wpis [debug] z metadanymi fetch_source i fe
 
 ## Współpraca z Heatmapa
 
-Projekt jest projektowany jako pomocniczy moduł dla workflowu z Heatmapa. W praktyce:
+Po wyszukaniu kraju i wybraniu stacji GUI automatycznie pyta NOAA o dostępne typy
+danych temperatury. Dotychczasowy tryb **Heatmapa (zgodność wsteczna)** nadal
+zapisuje dokładnie ten sam układ: `station_id`, `years`, 12 nazw miesięcy, macierz
+`temperatures` w układzie rok × miesiąc, `final_missing_years`,
+`missing_data_report`, `token_usage` oraz `adaptive_history`. Prefiks `GHCND:` jest
+usuwany z `station_id`, tak jak w istniejących plikach `*_temperatures.json`.
 
-- pozwala znaleźć odpowiednie ID stacji NOAA dla danego miasta lub kraju,
-- dostarcza metadane stacji, które można wykorzystać przy przygotowaniu danych wejściowych,
-- ułatwia późniejsze generowanie lub mapowanie danych do formatu używanego przez Heatmapa.
+GUI zawiera interaktywną mapę Leaflet z podkładem OpenStreetMap. Po wyszukaniu kraju mapa
+pokazuje wszystkie stacje ze współrzędnymi z aktualnego wyniku, grupuje blisko położone
+punkty i automatycznie dopasowuje widok. Kliknięcie klastra przybliża jego obszar, a
+kliknięcie punktu wybiera tę samą stację do eksportu temperatur. Wybranie wiersza tabeli
+przenosi mapę do stacji i otwiera jej opis. Przyciski pozwalają ponownie dopasować stacje
+albo wrócić do widoku całego świata.
 
-W przyszłości dane z tego narzędzia mogą być używane jako warstwa wejściowa do przygotowania plików JSON dla Heatmapa, np. przy definiowaniu źródła stacji dla konkretnego miasta.
+Biblioteki Leaflet i Leaflet.markercluster są dostarczane lokalnie wraz z aplikacją i nie
+wymagają zewnętrznego CDN. Kafelki OpenStreetMap są pobierane wyłącznie dla aktualnie
+widocznego obszaru, dlatego szczegółowy podkład mapy wymaga połączenia z internetem.
+
+GUI udostępnia również trzy nowe eksporty:
+
+- **Dzienne** — osobne wartości `TMIN`, raportowane przez NOAA `TAVG`, obliczane
+  `TAXN`, `TMAX`, amplituda dobowa i flagi źródłowe; plik
+  `*_daily_temperatures.json`.
+- **Miesięczne** — osobne macierze `TMIN`, `TAVG`, `TAXN`, `TMAX` i amplitudy wraz
+  z procentową kompletnością każdego elementu; plik `*_monthly_temperatures.json`.
+- **Statystyki rozszerzone** — średnie, minima, maksima, amplituda, kompletność i
+  porównanie `TAVG` z `TAXN`; plik `*_monthly_statistics.json`.
+
+Każdy nowy plik zawiera `temperature_methods`. `TAVG` jest opisane jako wartość
+raportowana przez NOAA, której metoda zależy od źródła. `TAXN` jest zawsze liczone
+lokalnie według jawnego wzoru `(TMAX + TMIN) / 2`. Obserwacje z niepustą flagą
+kontroli jakości NOAA nie uczestniczą w obliczeniach, a ich liczba trafia do
+`quality_control`.
 
 ## Testy
 
@@ -208,11 +261,12 @@ Serwer GUI udostepnia wersjonowany kontrakt i endpointy diagnostyczne:
 
 - `GET /openapi.json` - kontrakt OpenAPI 3.1 zgodny z wersja pakietu,
 - `GET /health/live` - lekki liveness procesu; `/health` pozostaje aliasem kompatybilnosci,
-- `GET /health/ready` - readiness bez wykonywania zapytania do NOAA,
+- `GET /health/ready` - readiness bez zapytania do NOAA; zwraca `503`, gdy brakuje lokalnego tokenu,
 - `GET /metrics` - metryki Prometheus requestow, bledow, fallbackow, przeciazenia i czasu odpowiedzi.
 
-Pobieranie z NOAA ma 15-sekundowy budzet obejmujacy cala sekwencje retry, backoff i
-przekierowan. Przekroczenie budzetu zwraca kontrolowane `504 NOAA_TIMEOUT`. Odpowiedzi
+Pobieranie katalogu stacji z NOAA ma 15-sekundowy budżet obejmujący wszystkie strony,
+retry, backoff i przekierowania. Przekroczenie budżetu zwraca kontrolowane
+`504 NOAA_TIMEOUT`. Żądania zapisu wymagają JSON i odrzucają obcy nagłówek `Origin`. Odpowiedzi
 HTTP zawieraja CSP, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`,
 `Cache-Control: no-store` oraz korelacyjny `X-Request-ID`.
 
@@ -222,6 +276,8 @@ opisane w `OPERATIONS.md`.
 ## Zrodla danych i noty
 
 - Projekt korzysta z danych stacji publikowanych przez NOAA/NCEI API.
+- Interaktywny podkład mapowy korzysta z kafelków i danych © OpenStreetMap contributors.
+- Publiczny serwer kafelków nie jest przeznaczony do pobierania hurtowego ani trybu offline.
 - Warunki uzycia i limity API nalezy sprawdzac w oficjalnej dokumentacji NOAA: https://www.ncei.noaa.gov/cdo-web/webservices/v2
 - Projekt nie jest powiazany organizacyjnie z NOAA.
 - Dane zrodlowe sa dostarczane przez dostawce zewnetrznego i moga sie zmieniac niezaleznie od tego repozytorium.

@@ -749,3 +749,40 @@ def test_verbose_reports_noaa_normalization_drops(capsys):
     captured = capsys.readouterr()
     assert "[warning][NOAA_NORMALIZATION]" in captured.err
     assert "[debug]" in captured.err
+
+
+def test_direct_search_and_print_edge_cases(capsys):
+    from dane_meteo_stacje.cli import print_search_results, search_stations
+
+    stations = [
+        {"station_id": "B", "city": "Beta", "name": "Zulu", "country": "Poland"},
+        {"station_id": "A", "city": "Alpha", "name": "Alpha", "country": "Poland"},
+    ]
+    assert search_stations("  ", stations=stations) == []
+    assert search_stations("a", stations=stations, sort_by="station_id")[0]["station_id"] == "A"
+    assert search_stations("a", stations=stations, limit=-1) == []
+
+    print_search_results([], as_json=False)
+    assert "Brak wyników" in capsys.readouterr().out
+    print_search_results([], as_json=True)
+    assert capsys.readouterr().out.strip() == "[]"
+
+
+def test_direct_station_info_missing_and_json(capsys):
+    from dane_meteo_stacje.cli import print_station_info
+
+    print_station_info("missing", stations=[], as_json=False)
+    assert "Nie znaleziono" in capsys.readouterr().out
+    print_station_info("missing", stations=[], as_json=True)
+    assert json.loads(capsys.readouterr().out)["found"] is False
+
+    station = {"station_id": "A", "city": "Alpha", "name": "Alpha", "country": "Poland"}
+    print_station_info("A", stations=[station], as_json=True)
+    assert json.loads(capsys.readouterr().out)["station_id"] == "A"
+
+
+def test_warning_code_covers_generic_warning():
+    from dane_meteo_stacje.cli import _warning_code
+
+    assert _warning_code("remote", {"warning": "partial"}) == "FETCH_WARNING"
+    assert _warning_code("remote", {}) == "INFO"

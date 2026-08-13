@@ -7,6 +7,8 @@ from dane_meteo_stacje.data import (
     NoaaRateLimitError,
     TokenProvider,
     fetch_remote_stations,
+    private_env_file_path,
+    resolve_env_file,
 )
 
 
@@ -60,6 +62,36 @@ def test_token_provider_round_robin_and_blocking_windows():
     assert provider.acquire() == "token-a"
 
 
+def test_token_provider_waits_for_per_token_request_slot():
+    now = [100.0]
+    sleeps = []
+
+    def advance(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    provider = TokenProvider(
+        ["token"],
+        request_interval_seconds=0.25,
+        now_fn=lambda: now[0],
+        sleep_fn=advance,
+    )
+
+    assert provider.has_available_token() is True
+    assert provider.acquire() == "token"
+    assert provider.acquire() is None
+    assert provider.acquire(wait_for_slot=True) == "token"
+    assert sleeps == [0.25]
+
+
+def test_token_provider_noop_markers_accept_missing_token():
+    provider = TokenProvider([])
+    provider.mark_rate_limited(None)
+    provider.mark_auth_failed(None)
+
+    assert provider.acquire() is None
+
+
 def test_fetch_remote_stations_rotates_token_on_rate_limit():
     provider = TokenProvider(["bad", "good"], now_fn=lambda: 0.0)
     fake_client = FakeNoaaClient({"bad": "rate-limit", "good": "ok"})
@@ -90,6 +122,20 @@ def test_fetch_remote_stations_rotates_token_on_auth_error():
     assert metadata["token_fingerprint"] == hashlib.sha256(b"fresh").hexdigest()[:10]
 
 
+def test_fetch_remote_stations_tries_every_token_before_failing_over():
+    provider = TokenProvider(["bad-1", "bad-2", "good"], now_fn=lambda: 0.0)
+    fake_client = FakeNoaaClient({"bad-1": "auth", "bad-2": "rate-limit", "good": "ok"})
+
+    stations, _ = fetch_remote_stations(
+        "https://example.invalid/stations",
+        client=fake_client,
+        token_provider=provider,
+    )
+
+    assert stations[0]["station_id"] == "T1"
+    assert fake_client.calls == ["bad-1", "bad-2", "good"]
+
+
 def test_fetch_remote_stations_fails_when_all_tokens_unhealthy():
     now = [1000.0]
     provider = TokenProvider(["only-token"], auth_quarantine_seconds=60, now_fn=lambda: now[0])
@@ -116,6 +162,70 @@ def test_token_provider_from_env_supports_noaa_api_tokens(monkeypatch):
     assert provider.acquire() == "api-b"
     assert provider.acquire() == "pool-a"
     assert provider.acquire() == "single-a"
+
+
+def test_token_provider_loads_project_dotenv_without_overriding_process_env(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DANE_METEO_ENV_FILE", raising=False)
+    monkeypatch.delenv("NOAA_TOKENS", raising=False)
+    monkeypatch.delenv("NOAA_TOKEN", raising=False)
+    monkeypatch.setenv("NOAA_API_TOKENS", "process-token")
+    (tmp_path / ".env").write_text("NOAA_API_TOKENS=file-token\nNOAA_TOKENS=file-pool\n", encoding="utf-8")
+
+    provider = TokenProvider.from_env()
+
+    assert provider.acquire() == "process-token"
+    assert provider.acquire() == "file-pool"
+
+
+def test_token_provider_loads_explicit_dotenv_file(monkeypatch, tmp_path):
+    env_file = tmp_path / "tokens.env"
+    env_file.write_text("NOAA_API_TOKENS=file-a, file-b\n", encoding="utf-8")
+    monkeypatch.setenv("DANE_METEO_ENV_FILE", str(env_file))
+    monkeypatch.delenv("NOAA_API_TOKENS", raising=False)
+    monkeypatch.delenv("NOAA_TOKENS", raising=False)
+    monkeypatch.delenv("NOAA_TOKEN", raising=False)
+
+    provider = TokenProvider.from_env()
+
+    assert provider.acquire() == "file-a"
+    assert provider.acquire() == "file-b"
+
+
+def test_token_provider_reloads_dotenv_when_file_changes(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DANE_METEO_ENV_FILE", raising=False)
+    monkeypatch.delenv("NOAA_API_TOKENS", raising=False)
+    monkeypatch.delenv("NOAA_TOKENS", raising=False)
+    monkeypatch.delenv("NOAA_TOKEN", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("NOAA_API_TOKENS=first-token\n", encoding="utf-8")
+
+    first_provider = TokenProvider.from_env()
+    env_file.write_text("NOAA_API_TOKENS=second-token\n", encoding="utf-8")
+    second_provider = TokenProvider.from_env()
+
+    assert first_provider.acquire() == "first-token"
+    assert second_provider.acquire() == "second-token"
+
+
+def test_private_env_file_has_priority_over_legacy_project_file(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local"
+    private_file = local_app_data / "Dane-Meteo-Stacje" / ".env"
+    private_file.parent.mkdir(parents=True)
+    private_file.write_text("NOAA_API_TOKENS=private-token\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".env").write_text("NOAA_API_TOKENS=legacy-token\n", encoding="utf-8")
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("DANE_METEO_ENV_FILE", raising=False)
+    for name in ("NOAA_API_TOKENS", "NOAA_TOKENS", "NOAA_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert private_env_file_path() == private_file
+    assert resolve_env_file() == private_file
+    assert TokenProvider.from_env().acquire() == "private-token"
 
 
 def test_fetch_remote_stations_reports_noaa_normalization_quality():

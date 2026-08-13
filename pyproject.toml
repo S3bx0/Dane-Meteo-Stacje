@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 authors = [{name = "Sebastian"}]
 license = "MIT"
 dependencies = [
+	"python-dotenv>=1.0.0",
 	"requests>=2.31.0",
 	"typing-extensions>=4.4.0",
 ]
@@ -41,6 +42,12 @@ dane-meteo-stacje-gui = "dane_meteo_stacje.gui_bootstrap:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "dane_meteo_stacje.__version__"}
+
+[tool.setuptools.package-data]
+dane_meteo_stacje = [
+	"static/vendor/leaflet/*",
+	"static/vendor/leaflet-markercluster/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
