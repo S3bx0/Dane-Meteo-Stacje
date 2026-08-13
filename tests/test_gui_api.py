@@ -92,6 +92,18 @@ def test_get_routes(gui_server, monkeypatch):
     assert b'id="station-map"' in body
     assert b'id="map-fit-btn"' in body
     assert b'id="map-reset-btn"' in body
+    assert b'id="map-country-boundary"' in body
+    assert b'id="quality-min-years"' in body
+    assert b'id="quality-min-coverage"' in body
+    assert b'id="best-station-btn"' in body
+    assert b'id="temperature-preview-chart"' in body
+    assert b'id="amplitude-preview-chart"' in body
+    assert b'id="nearby-quality-body"' in body
+    assert b'id="station-comparison-panel"' in body
+    assert b'id="comparison-selection"' in body
+    assert b'id="comparison-temperature-chart"' in body
+    assert b'id="comparison-summary-body"' in body
+    assert b'id="comparison-distance-body"' in body
     assert b"/static/vendor/leaflet/leaflet.js" in body
     assert b"/static/vendor/leaflet-markercluster/leaflet.markercluster.js" in body
     assert b"function initializeStationMap" in body
@@ -99,6 +111,16 @@ def test_get_routes(gui_server, monkeypatch):
     assert b"function stationClusterIcon" in body
     assert b"function fitMapToStations" in body
     assert b"function focusMapOnStation" in body
+    assert b"function loadCountryBoundary" in body
+    assert b'fillOpacity: 0.12' in body
+    assert b'fetch("/api/country-boundary"' in body
+    assert b"function selectBestStation" in body
+    assert b"function loadTemperaturePreview" in body
+    assert b"function renderNearbyQualityComparison" in body
+    assert b"function toggleComparisonStation" in body
+    assert b"function loadStationComparison" in body
+    assert b"function renderStationComparison" in body
+    assert b"function renderDistanceMatrix" in body
     assert b"https://tile.openstreetmap.org/{z}/{x}/{y}.png" in body
     assert b"html: '<span aria-hidden=\"true\"></span>'" in body
     assert b"target=\"_blank\" rel=\"noopener noreferrer\"" in body
@@ -326,6 +348,8 @@ def test_country_only_search_filters_sorts_and_limits(gui_server, monkeypatch):
     assert status == 200
     assert payload["source"] == "remote"
     assert [row["station_id"] for row in payload["results"]] == ["PL1"]
+    assert payload["results"][0]["quality"]["assessment"] == "catalogue"
+    assert payload["results"][0]["quality"]["grade"] == "weak"
 
 
 def test_query_search_applies_country_and_station_filters(gui_server, monkeypatch):
@@ -421,6 +445,75 @@ def test_search_maps_noaa_deadline_to_504_and_passes_budget(gui_server, monkeypa
     assert status == 504
     assert captured["remote_timeout_seconds"] == gui.REMOTE_REQUEST_DEADLINE_SECONDS
     assert "deadline" not in payload["message"]
+
+
+def test_country_boundary_endpoint_fetches_geojson_and_reuses_cache(
+    gui_server,
+    monkeypatch,
+    tmp_path,
+):
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [[[14.1, 54.8], [24.1, 54.8], [24.1, 49.0], [14.1, 54.8]]],
+    }
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Length": "256"}
+        content = b"{}"
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> list[dict[str, Any]]:
+            return [{"display_name": "Polska", "geojson": geometry}]
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(gui, "GUI_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gui, "_LAST_BOUNDARY_FETCH_AT", 0.0)
+    monkeypatch.setattr(gui.requests, "get", fake_get)
+
+    status, headers, body = _request(
+        gui_server,
+        "POST",
+        "/api/country-boundary",
+        {"country": "Poland"},
+    )
+    response = _assert_json_contract(headers, body)
+    assert status == 200
+    assert response["source"] == "nominatim"
+    assert response["data"]["geometry"] == geometry
+    assert calls[0][0] == "https://nominatim.openstreetmap.org/search"
+    assert calls[0][1]["params"]["featureType"] == "country"
+    assert calls[0][1]["params"]["polygon_geojson"] == "1"
+    assert "Dane-Meteo-Stacje" in calls[0][1]["headers"]["User-Agent"]
+
+    status, headers, body = _request(
+        gui_server,
+        "POST",
+        "/api/country-boundary",
+        {"country": "Poland"},
+    )
+    response = _assert_json_contract(headers, body)
+    assert status == 200
+    assert response["source"] == "cache"
+    assert len(calls) == 1
+
+
+def test_country_boundary_endpoint_validates_country(gui_server):
+    status, _, body = _request(
+        gui_server,
+        "POST",
+        "/api/country-boundary",
+        {"country": "Atlantis"},
+    )
+    assert status == 400
+    assert json.loads(body)["code"] == "BAD_REQUEST"
 
 
 def test_temperature_endpoint_returns_heatmap_payload(gui_server, monkeypatch):
