@@ -109,12 +109,20 @@ class CountryBoundaryError(RuntimeError):
 
 def _country_cache_path(country: str) -> Path:
   country_code = os.path.basename(country_to_fips_code(country))
-  return GUI_CACHE_DIR / "stations" / f"{country_code}.json"
+  base_path = os.path.realpath(GUI_CACHE_DIR / "stations")
+  full_path = os.path.realpath(os.path.join(base_path, f"{country_code}.json"))
+  if not full_path.startswith(base_path + os.sep):
+    raise ValueError("country cache path must stay inside the managed cache directory")
+  return Path(full_path)
 
 
 def _country_boundary_cache_path(country: str) -> Path:
   country_code = os.path.basename(country_to_fips_code(country))
-  return GUI_CACHE_DIR / "boundaries" / f"{country_code}.geojson"
+  base_path = os.path.realpath(GUI_CACHE_DIR / "boundaries")
+  full_path = os.path.realpath(os.path.join(base_path, f"{country_code}.geojson"))
+  if not full_path.startswith(base_path + os.sep):
+    raise ValueError("country boundary path must stay inside the managed cache directory")
+  return Path(full_path)
 
 
 def _read_country_boundary_cache(country: str, *, allow_stale: bool = False) -> dict[str, Any] | None:
