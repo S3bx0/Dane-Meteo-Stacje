@@ -17,10 +17,24 @@ from dane_meteo_stacje.data import (
     _infer_country_from_noaa_item,
     _normalize_noaa_payload,
     _normalize_station,
+    _temperature_records_cache_path,
+    _temperature_year_cache_path,
     fetch_remote_stations,
     fetch_stations_with_cache_details,
     load_stations,
 )
+
+
+@pytest.mark.parametrize("builder", [_temperature_year_cache_path, _temperature_records_cache_path])
+def test_temperature_cache_paths_confine_station_identifier(builder, tmp_path):
+    path = builder(tmp_path, "SP000008181", 2025)
+
+    assert path.is_relative_to(tmp_path)
+    assert path.name == "2025.json"
+    assert "SP000008181" in path.parts
+
+    with pytest.raises(ValueError, match="11-character GHCND"):
+        builder(tmp_path, "../escape", 2025)
 
 
 class _DummyResponse:

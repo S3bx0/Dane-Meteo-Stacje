@@ -13,7 +13,7 @@ import webbrowser
 from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from threading import BoundedSemaphore, Lock
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -107,25 +107,14 @@ class CountryBoundaryError(RuntimeError):
     pass
 
 
-def _resolve_gui_cache_path(value: object) -> Path | None:
-  if value is None or not str(value).strip():
-    return None
-
-  raw_name = str(value).strip()
-  path_variants = (PurePosixPath(raw_name), PureWindowsPath(raw_name))
-  if any(path.is_absolute() or len(path.parts) != 1 or path.name != raw_name for path in path_variants):
-    raise ValueError("cache_path must be a file name without directories")
-  if PurePosixPath(raw_name).suffix.lower() != ".json":
-    raise ValueError("cache_path must use the .json extension")
-  return GUI_CACHE_DIR / raw_name
-
-
 def _country_cache_path(country: str) -> Path:
-  return GUI_CACHE_DIR / "stations" / f"{country_to_fips_code(country)}.json"
+  country_code = os.path.basename(country_to_fips_code(country))
+  return GUI_CACHE_DIR / "stations" / f"{country_code}.json"
 
 
 def _country_boundary_cache_path(country: str) -> Path:
-  return GUI_CACHE_DIR / "boundaries" / f"{country_to_fips_code(country)}.geojson"
+  country_code = os.path.basename(country_to_fips_code(country))
+  return GUI_CACHE_DIR / "boundaries" / f"{country_code}.geojson"
 
 
 def _read_country_boundary_cache(country: str, *, allow_stale: bool = False) -> dict[str, Any] | None:
@@ -479,20 +468,11 @@ HTML_PAGE = """<!doctype html>
             <input id="limit" type="number" min="1" class="form-control" placeholder="all" />
           </div>
 
-          <div class="col-md-7">
-            <label for="remote-url" class="form-label">Advanced Remote URL (optional)</label>
-            <input
-              id="remote-url"
-              class="form-control mono"
-              placeholder="https://www.ncei.noaa.gov/cdo-web/api/v2/stations?..."
-            />
-            <div class="form-text">
-              Leave empty: Country automatically selects and paginates the NOAA GHCND station catalogue.
+          <div class="col-md-10">
+            <div class="form-text pt-md-4">
+              Wybierz kraj — aplikacja bezpiecznie zbuduje i stronicuje zapytanie do katalogu NOAA GHCND.
+              Pamięć podręczna jest zarządzana automatycznie w prywatnym katalogu użytkownika.
             </div>
-          </div>
-          <div class="col-md-3">
-            <label for="cache-path" class="form-label">Cache File</label>
-            <input id="cache-path" class="form-control mono" placeholder="cache.json" />
           </div>
           <div class="col-md-2">
             <label for="cache-ttl" class="form-label">Cache TTL (s)</label>
@@ -2671,8 +2651,6 @@ HTML_PAGE = """<!doctype html>
           station_id: byId("station-id").value || null,
           sort: byId("sort").value,
           limit: maybeInt(byId("limit").value),
-          remote_url: byId("remote-url").value || null,
-          cache_path: byId("cache-path").value || null,
           cache_ttl: maybeInt(byId("cache-ttl").value) ?? 3600,
           refresh: byId("refresh").checked,
           stale_if_error: byId("stale-if-error").checked,
@@ -2723,8 +2701,8 @@ HTML_PAGE = """<!doctype html>
             if (payload.station_id) {
               msg += " Hint: clear Station ID to widen search.";
             }
-            if (!payload.remote_url && source === "sample-default") {
-              msg += " Hint: add NOAA Remote URL; local sample has only demo stations.";
+            if (source === "sample-default") {
+              msg += " Wskazówka: wybierz kraj, aby pobrać pełny katalog stacji NOAA.";
             }
           }
           byId("message").textContent = msg;
@@ -3203,6 +3181,19 @@ class AppHandler(BaseHTTPRequestHandler):
         payload = self._read_json()
         query = str(payload.get("query", "")).strip()
 
+        if payload.get("remote_url") is not None or payload.get("cache_path") is not None:
+            self._send_json(
+                {
+                    "code": "BAD_REQUEST",
+                    "message": (
+                        "remote_url and cache_path are not accepted by the GUI API; "
+                        "select a country and use the managed NOAA cache"
+                    ),
+                },
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
         try:
             cache_ttl = _parse_int(payload.get("cache_ttl"), default=3600, minimum=0)
             if cache_ttl is None:
@@ -3216,23 +3207,6 @@ class AppHandler(BaseHTTPRequestHandler):
             )
             return
 
-        remote_url_value = payload.get("remote_url")
-        try:
-            remote_url = _validate_remote_url(str(remote_url_value)) if remote_url_value else None
-        except ValueError as exc:
-            self._send_json(
-                {"code": "BAD_REQUEST", "message": str(exc)},
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
-        try:
-            cache_path = _resolve_gui_cache_path(payload.get("cache_path"))
-        except ValueError as exc:
-            self._send_json(
-                {"code": "BAD_REQUEST", "message": str(exc)},
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
         country = payload.get("country")
         station_id = payload.get("station_id")
         sort_by = str(payload.get("sort", "city"))
@@ -3254,9 +3228,7 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             _METRICS.fetch_started()
             try:
-                if cache_path is not None:
-                    GUI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                if country and not remote_url:
+                if country:
                     result = fetch_stations_for_country(
                         str(country),
                         timeout=REMOTE_REQUEST_DEADLINE_SECONDS,
@@ -3267,8 +3239,8 @@ class AppHandler(BaseHTTPRequestHandler):
                     )
                 else:
                     result = fetch_stations_with_cache_details(
-                        cache_path=cache_path,
-                        remote_url=str(remote_url) if remote_url else None,
+                        cache_path=None,
+                        remote_url=None,
                         cache_ttl=cache_ttl,
                         refresh=bool(payload.get("refresh", False)),
                         allow_sample_fallback=bool(payload.get("allow_sample_fallback", False)),
