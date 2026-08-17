@@ -78,7 +78,7 @@ def test_noaa_client_retries_429_then_succeeds():
         ]
     )
 
-    payload, status, headers = client.fetch_json("https://example.invalid", token="t1")
+    payload, status, headers = client.fetch_json("https://www.ncei.noaa.gov/test", token="t1")
 
     assert status == 200
     assert payload == {"results": []}
@@ -91,7 +91,7 @@ def test_noaa_client_raises_auth_error():
     client._session = _DummySession([_DummyResponse(401)])
 
     with pytest.raises(NoaaAuthError):
-        client.fetch_json("https://example.invalid", token="t1")
+        client.fetch_json("https://www.ncei.noaa.gov/test", token="t1")
 
 
 def test_noaa_client_raises_rate_limit_when_retry_exhausted():
@@ -99,7 +99,7 @@ def test_noaa_client_raises_rate_limit_when_retry_exhausted():
     client._session = _DummySession([_DummyResponse(429)])
 
     with pytest.raises(NoaaRateLimitError):
-        client.fetch_json("https://example.invalid", token="t1")
+        client.fetch_json("https://www.ncei.noaa.gov/test", token="t1")
 
 
 def test_noaa_client_raises_payload_error_for_invalid_json():
@@ -107,7 +107,7 @@ def test_noaa_client_raises_payload_error_for_invalid_json():
     client._session = _DummySession([_DummyResponse(200, json_error=ValueError("bad json"))])
 
     with pytest.raises(NoaaPayloadError):
-        client.fetch_json("https://example.invalid", token="t1")
+        client.fetch_json("https://www.ncei.noaa.gov/test", token="t1")
 
 
 def test_noaa_client_raises_network_error_after_request_exception():
@@ -115,7 +115,7 @@ def test_noaa_client_raises_network_error_after_request_exception():
     client._session = _DummySession([requests.RequestException("boom")])
 
     with pytest.raises(NoaaNetworkError):
-        client.fetch_json("https://example.invalid", token="t1")
+        client.fetch_json("https://www.ncei.noaa.gov/test", token="t1")
 
 
 def test_noaa_client_maps_request_timeout_to_deadline_error():
@@ -123,7 +123,7 @@ def test_noaa_client_maps_request_timeout_to_deadline_error():
     client._session = _DummySession([requests.Timeout("slow")])
 
     with pytest.raises(NoaaTimeoutError, match="deadline"):
-        client.fetch_json("https://example.invalid", token="t1")
+        client.fetch_json("https://www.ncei.noaa.gov/test", token="t1")
 
 
 @pytest.mark.parametrize("status", [400, 404, 500, 503])
@@ -132,7 +132,7 @@ def test_noaa_client_raises_network_error_for_terminal_http_status(status):
     client._session = _DummySession([_DummyResponse(status)])
 
     with pytest.raises(NoaaNetworkError, match=f"HTTP {status}"):
-        client.fetch_json("https://example.invalid", token="t1")
+        client.fetch_json("https://www.ncei.noaa.gov/test", token="t1")
 
 
 def test_noaa_client_retries_server_error_then_succeeds():
@@ -141,7 +141,7 @@ def test_noaa_client_retries_server_error_then_succeeds():
         [_DummyResponse(503), _DummyResponse(200, payload={"results": []})]
     )
 
-    payload, status, _ = client.fetch_json("https://example.invalid", token="t1")
+    payload, status, _ = client.fetch_json("https://www.ncei.noaa.gov/test", token="t1")
 
     assert status == 200
     assert payload == {"results": []}
@@ -152,14 +152,14 @@ def test_noaa_client_rejects_redirect_without_location():
     client._session = _DummySession([_DummyResponse(302)])
 
     with pytest.raises(NoaaNetworkError, match="Location"):
-        client.fetch_json("https://example.invalid/stations")
+        client.fetch_json("https://www.ncei.noaa.gov/stations")
 
 
 def test_noaa_client_rejects_non_https_url():
     client = NoaaClient()
 
     with pytest.raises(NoaaNetworkError, match="HTTPS"):
-        client.fetch_json("http://example.com/stations")
+        client.fetch_json("http://www.ncei.noaa.gov/stations")
 
 
 def test_noaa_client_rejects_hostname_resolving_to_private_address(monkeypatch):
@@ -171,29 +171,29 @@ def test_noaa_client_rejects_hostname_resolving_to_private_address(monkeypatch):
     client = NoaaClient()
 
     with pytest.raises(NoaaNetworkError, match="public"):
-        client.fetch_json("https://internal.example/stations")
+        client.fetch_json("https://www.ncei.noaa.gov/stations")
 
 
 def test_noaa_client_rejects_redirect_to_private_address():
     client = NoaaClient()
     client._session = _DummySession([_DummyResponse(302, headers={"Location": "https://127.0.0.1/admin"})])
 
-    with pytest.raises(NoaaNetworkError, match="public"):
-        client.fetch_json("https://example.invalid/stations")
+    with pytest.raises(NoaaNetworkError, match="approved NOAA"):
+        client.fetch_json("https://www.ncei.noaa.gov/stations")
 
 
-def test_noaa_client_does_not_send_noaa_token_to_external_host():
+def test_noaa_client_rejects_external_host_before_request():
     client = NoaaClient()
     session = _DummySession([_DummyResponse(200, payload={"results": []})])
     client._session = session
 
-    client.fetch_json("https://example.invalid/stations", token="secret-token")
+    with pytest.raises(NoaaNetworkError, match="approved NOAA"):
+        client.fetch_json("https://example.invalid/stations", token="secret-token")
 
-    assert "token" not in session.calls[0]["headers"]
-    assert "Authorization" not in session.calls[0]["headers"]
+    assert session.calls == []
 
 
-def test_noaa_client_drops_token_when_noaa_redirects_to_external_host():
+def test_noaa_client_rejects_redirect_to_external_host():
     client = NoaaClient()
     session = _DummySession(
         [
@@ -203,11 +203,18 @@ def test_noaa_client_drops_token_when_noaa_redirects_to_external_host():
     )
     client._session = session
 
-    client.fetch_json("https://www.ncei.noaa.gov/stations", token="secret-token")
+    with pytest.raises(NoaaNetworkError, match="approved NOAA"):
+        client.fetch_json("https://www.ncei.noaa.gov/stations", token="secret-token")
 
     assert session.calls[0]["headers"]["token"] == "secret-token"
-    assert "token" not in session.calls[1]["headers"]
-    assert "Authorization" not in session.calls[1]["headers"]
+    assert len(session.calls) == 1
+
+
+def test_noaa_client_rejects_noaa_lookalike_hostname():
+    client = NoaaClient()
+
+    with pytest.raises(NoaaNetworkError, match="approved NOAA"):
+        client.fetch_json("https://www.ncei.noaa.gov.attacker.example/stations")
 
 
 def test_extract_city_uses_location_and_coordinates_fallbacks():

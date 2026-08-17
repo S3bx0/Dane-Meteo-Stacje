@@ -82,6 +82,7 @@ def test_get_routes(gui_server, monkeypatch):
     monkeypatch.delenv("NOAA_API_TOKENS", raising=False)
     monkeypatch.delenv("NOAA_TOKENS", raising=False)
     monkeypatch.delenv("NOAA_TOKEN", raising=False)
+    monkeypatch.setattr(gui.TokenProvider, "configured_tokens", classmethod(lambda cls: []))
     status, headers, body = _request(gui_server, "GET", "/")
     assert status == 200
     assert headers["content-type"] == "text/html; charset=utf-8"
@@ -127,7 +128,12 @@ def test_get_routes(gui_server, monkeypatch):
     assert "unsafe-inline" not in headers["content-security-policy"].split("script-src", 1)[1].split(";", 1)[0]
     csp_nonce = headers["content-security-policy"].split("script-src 'nonce-", 1)[1].split("'", 1)[0]
     assert f'<script nonce="{csp_nonce}">'.encode() in body
-    assert "https://tile.openstreetmap.org" in headers["content-security-policy"]
+    csp_directives: dict[str, set[str]] = {}
+    for directive in headers["content-security-policy"].split(";"):
+        tokens = directive.split()
+        if tokens:
+            csp_directives[tokens[0]] = set(tokens[1:])
+    assert "https://tile.openstreetmap.org" in csp_directives["img-src"]
 
     status, static_headers, static_body = _request(gui_server, "GET", "/static/vendor/leaflet/leaflet.js")
     assert status == 200

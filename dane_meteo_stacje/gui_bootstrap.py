@@ -25,6 +25,7 @@ from .api_contract import OPENAPI_DOCUMENT
 from .cli import search_stations
 from .countries import COUNTRY_FIPS_CODES, country_to_fips_code
 from .data import (
+    NOAA_ALLOWED_HOSTS,
     NoaaClientError,
     NoaaTimeoutError,
     StationRecord,
@@ -2910,11 +2911,11 @@ def _parse_content_length(raw_value: str | None) -> int:
 
 def _validate_remote_url(value: str) -> str:
     parsed = urlparse(value)
-    hostname = (parsed.hostname or "").lower()
+    hostname = (parsed.hostname or "").rstrip(".").lower()
     if parsed.scheme != "https" or not hostname:
         raise ValueError("Remote URL must be a valid HTTPS URL")
-    if hostname != "noaa.gov" and not hostname.endswith(".noaa.gov"):
-        raise ValueError("Remote URL host must belong to noaa.gov")
+    if hostname not in NOAA_ALLOWED_HOSTS:
+        raise ValueError("Remote URL host must be an approved NOAA NCEI server")
     if parsed.username or parsed.password:
         raise ValueError("Remote URL must not contain credentials")
     return value
