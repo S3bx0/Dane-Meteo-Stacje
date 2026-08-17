@@ -257,8 +257,6 @@ OPENAPI_DOCUMENT: dict[str, Any] = {
                     "station_id": {"type": "string"},
                     "sort": {"enum": ["city", "name", "station_id"]},
                     "limit": {"type": "integer", "minimum": 1},
-                    "remote_url": {"type": "string", "format": "uri"},
-                    "cache_path": {"type": "string"},
                     "cache_ttl": {"type": "integer", "minimum": 0},
                     "refresh": {"type": "boolean"},
                     "allow_sample_fallback": {"type": "boolean"},

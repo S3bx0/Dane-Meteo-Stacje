@@ -1277,7 +1277,10 @@ def _fetch_temperature_year(
 
 
 def _temperature_year_cache_path(cache_dir: Path, station_id: str, year: int) -> Path:
-    return cache_dir / station_id / f"{year}.json"
+    safe_station_id = os.path.basename(station_id)
+    if safe_station_id != station_id or not re.fullmatch(r"[A-Z0-9]{11}", safe_station_id):
+        raise ValueError("station_id must be an 11-character GHCND identifier")
+    return cache_dir / safe_station_id / f"{year}.json"
 
 
 def _read_temperature_year_cache(
@@ -1649,7 +1652,10 @@ def _fetch_temperature_records_year(
 
 
 def _temperature_records_cache_path(cache_dir: Path, station_id: str, year: int) -> Path:
-    return cache_dir / "observations" / station_id / f"{year}.json"
+    safe_station_id = os.path.basename(station_id)
+    if safe_station_id != station_id or not re.fullmatch(r"[A-Z0-9]{11}", safe_station_id):
+        raise ValueError("station_id must be an 11-character GHCND identifier")
+    return cache_dir / "observations" / safe_station_id / f"{year}.json"
 
 
 def _read_temperature_records_cache(

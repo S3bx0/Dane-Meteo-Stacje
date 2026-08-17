@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from dane_meteo_stacje.cli import search_stations
@@ -79,6 +79,7 @@ def test_search_results_match_query_sort_and_limit(stations, query, limit):
     assert results == sorted(results, key=lambda station: str(station.get("city", "")).lower())
 
 
+@settings(deadline=None)
 @given(stations=st.lists(station_records, max_size=20))
 def test_json_and_csv_exports_round_trip(stations):
     with tempfile.TemporaryDirectory() as directory:

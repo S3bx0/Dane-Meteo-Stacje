@@ -133,7 +133,12 @@ def test_get_routes(gui_server, monkeypatch):
         tokens = directive.split()
         if tokens:
             csp_directives[tokens[0]] = set(tokens[1:])
-    assert "https://tile.openstreetmap.org" in csp_directives["img-src"]
+    assert csp_directives["img-src"] == {
+        "'self'",
+        "blob:",
+        "data:",
+        "https://tile.openstreetmap.org",
+    }
 
 
 @pytest.mark.parametrize("use_private", [True, False])
@@ -409,28 +414,16 @@ def test_search_validates_numeric_options(gui_server):
     assert json.loads(body)["code"] == "BAD_REQUEST"
 
 
-def test_search_confines_cache_file_to_gui_cache_directory(gui_server, monkeypatch, tmp_path):
-    captured = {}
-
-    def capture_fetch(**kwargs):
-        captured.update(kwargs)
-        return FetchResult(stations=[], source="sample-default", metadata={})
-
-    monkeypatch.setattr(gui, "GUI_CACHE_DIR", tmp_path)
-    monkeypatch.setattr(gui, "fetch_stations_with_cache_details", capture_fetch)
-
-    status, _, _ = _request(gui_server, "POST", "/api/search", {"cache_path": "stations.json"})
-
-    assert status == 200
-    assert captured["cache_path"] == tmp_path / "stations.json"
-    assert tmp_path.is_dir()
-
-
 @pytest.mark.parametrize(
-    "cache_path",
-    ["../outside.json", "nested/cache.json", "C:\\outside.json", "C:outside.json", "notes.txt"],
+    "field,value",
+    [
+        ("cache_path", "stations.json"),
+        ("cache_path", "../outside.json"),
+        ("remote_url", "https://www.ncei.noaa.gov/cdo-web/api/v2/stations"),
+        ("remote_url", "https://example.com/stations"),
+    ],
 )
-def test_search_rejects_unsafe_cache_path(gui_server, monkeypatch, cache_path):
+def test_search_rejects_unmanaged_remote_and_cache_options(gui_server, monkeypatch, field, value):
     fetch_called = False
 
     def capture_fetch(**kwargs):
@@ -440,7 +433,7 @@ def test_search_rejects_unsafe_cache_path(gui_server, monkeypatch, cache_path):
 
     monkeypatch.setattr(gui, "fetch_stations_with_cache_details", capture_fetch)
 
-    status, _, body = _request(gui_server, "POST", "/api/search", {"cache_path": cache_path})
+    status, _, body = _request(gui_server, "POST", "/api/search", {field: value})
 
     assert status == 400
     assert json.loads(body)["code"] == "BAD_REQUEST"
@@ -448,15 +441,15 @@ def test_search_rejects_unsafe_cache_path(gui_server, monkeypatch, cache_path):
 
 
 def test_search_maps_noaa_errors(gui_server, monkeypatch):
-    def fail_fetch(**kwargs):
+    def fail_fetch(*args, **kwargs):
         raise NoaaNetworkError("offline")
 
-    monkeypatch.setattr(gui, "fetch_stations_with_cache_details", fail_fetch)
+    monkeypatch.setattr(gui, "fetch_stations_for_country", fail_fetch)
     status, _, body = _request(
         gui_server,
         "POST",
         "/api/search",
-        {"remote_url": "https://www.ncei.noaa.gov/cdo-web/api/v2/stations"},
+        {"country": "Poland"},
     )
 
     assert status == 502
