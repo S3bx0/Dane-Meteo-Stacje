@@ -167,6 +167,7 @@ def test_country_names_use_ghcn_fips_codes(country, expected_name, expected_code
 def test_country_search_requires_configured_token(monkeypatch):
     for variable in ("NOAA_API_TOKENS", "NOAA_TOKENS", "NOAA_TOKEN"):
         monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setattr(TokenProvider, "configured_tokens", classmethod(lambda cls: []))
 
     with pytest.raises(NoaaAuthError, match="not configured"):
         fetch_stations_for_country("Poland")

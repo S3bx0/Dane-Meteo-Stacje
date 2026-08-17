@@ -69,7 +69,7 @@ def _monthly_preview(station_id: str = "PL000012345", offset: float = 0.0) -> di
         for year_index, _ in enumerate(years)
     ]
     completeness = [[100.0] * 12 for _ in years]
-    completeness[1][4] = 80.0
+    completeness[1] = [80.0] * 12
     return {
         "schema_version": 1,
         "export_type": "monthly",

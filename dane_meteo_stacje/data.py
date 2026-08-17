@@ -32,6 +32,7 @@ from .observability import log_event
 _RANDOM = SystemRandom()
 _MAX_REDIRECTS = 5
 NOAA_API_BASE_URL = "https://www.ncei.noaa.gov/cdo-web/api/v2"
+NOAA_ALLOWED_HOSTS = frozenset({"ncei.noaa.gov", "www.ncei.noaa.gov"})
 NOAA_STATIONS_ENDPOINT = f"{NOAA_API_BASE_URL}/stations"
 NOAA_DATA_ENDPOINT = f"{NOAA_API_BASE_URL}/data"
 NOAA_DATATYPES_ENDPOINT = f"{NOAA_API_BASE_URL}/datatypes"
@@ -69,10 +70,10 @@ class NoaaPayloadError(NoaaClientError):
 
 def _is_noaa_hostname(hostname: str) -> bool:
     normalized = hostname.rstrip(".").lower()
-    return normalized == "noaa.gov" or normalized.endswith(".noaa.gov")
+    return normalized in NOAA_ALLOWED_HOSTS
 
 
-def _validate_public_https_url(url: str) -> str:
+def _validate_noaa_https_url(url: str) -> str:
     try:
         parsed = urlparse(url)
         port = parsed.port or 443
@@ -83,6 +84,8 @@ def _validate_public_https_url(url: str) -> str:
         raise NoaaNetworkError("Remote URL must use HTTPS")
     if not parsed.hostname or parsed.username is not None or parsed.password is not None:
         raise NoaaNetworkError("Remote URL must contain a host without credentials")
+    if not _is_noaa_hostname(parsed.hostname):
+        raise NoaaNetworkError("Remote URL host must be an approved NOAA NCEI server")
 
     try:
         addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
@@ -470,7 +473,7 @@ class NoaaClient:
         time.sleep(delay)
 
     def fetch_json(self, url: str, token: str | None = None) -> tuple[Any, int, dict[str, str]]:
-        current_url = _validate_public_https_url(url)
+        current_url = _validate_noaa_https_url(url)
         deadline = time.monotonic() + self.timeout
         rate_retries_used = 0
         server_retries_used = 0
@@ -513,7 +516,7 @@ class NoaaClient:
                 redirects_followed += 1
                 if redirects_followed > _MAX_REDIRECTS:
                     raise NoaaNetworkError("Remote URL exceeded the redirect limit")
-                current_url = _validate_public_https_url(urljoin(current_url, location))
+                current_url = _validate_noaa_https_url(urljoin(current_url, location))
                 continue
             if status in (401, 403):
                 raise NoaaAuthError(f"HTTP {status}")
