@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -215,6 +216,102 @@ def test_noaa_client_rejects_noaa_lookalike_hostname():
 
     with pytest.raises(NoaaNetworkError, match="approved NOAA"):
         client.fetch_json("https://www.ncei.noaa.gov.attacker.example/stations")
+
+
+def test_noaa_client_rejects_credentials_in_url():
+    client = NoaaClient()
+
+    with pytest.raises(NoaaNetworkError, match="without credentials"):
+        client.fetch_json("https://user:password@www.ncei.noaa.gov/stations")
+
+
+def test_noaa_client_maps_invalid_port_to_network_error():
+    client = NoaaClient()
+
+    with pytest.raises(NoaaNetworkError, match="invalid"):
+        client.fetch_json("https://www.ncei.noaa.gov:not-a-port/stations")
+
+
+def test_noaa_client_rejects_unresolvable_or_empty_dns(monkeypatch):
+    client = NoaaClient()
+    monkeypatch.setattr(data.socket, "getaddrinfo", lambda *args, **kwargs: [])
+
+    with pytest.raises(NoaaNetworkError, match="public"):
+        client.fetch_json("https://www.ncei.noaa.gov/stations")
+
+    def fail_dns(*args, **kwargs):
+        raise OSError("dns unavailable")
+
+    monkeypatch.setattr(data.socket, "getaddrinfo", fail_dns)
+    with pytest.raises(NoaaNetworkError, match="could not be resolved"):
+        client.fetch_json("https://www.ncei.noaa.gov/stations")
+
+
+def test_station_quality_handles_invalid_catalogue_values_and_recency_bands():
+    invalid = data.station_quality_summary(
+        {"datacoverage": "bad", "mindate": "invalid", "maxdate": "invalid"},
+        reference_date=date(2026, 1, 1),
+    )
+    assert invalid["grade"] == "weak"
+    assert invalid["coverage_percent"] == 0.0
+
+    recent_medium = data.station_quality_summary(
+        {"datacoverage": 0.6, "mindate": "2000-01-01", "maxdate": "2022-12-31"},
+        reference_date=date(2026, 1, 1),
+    )
+    older_medium = data.station_quality_summary(
+        {"datacoverage": 0.6, "mindate": "2000-01-01", "maxdate": "2019-12-31"},
+        reference_date=date(2026, 1, 1),
+    )
+    assert recent_medium["grade"] == "medium"
+    assert older_medium["score"] < recent_medium["score"]
+
+
+def test_station_normalization_rejects_bad_numbers_and_keeps_dates():
+    normalized = _normalize_station(
+        {
+            "station_id": "PL000000001",
+            "city": "Warsaw",
+            "name": "Warsaw",
+            "country": "Poland",
+            "latitude": object(),
+            "longitude": "21.0",
+            "mindate": "1980-01-01",
+            "maxdate": "2025-12-31",
+        }
+    )
+
+    assert normalized is not None
+    assert "latitude" not in normalized
+    assert normalized["longitude"] == 21.0
+    assert normalized["mindate"] == "1980-01-01"
+
+
+def test_noaa_payload_normalization_covers_fallbacks_and_invalid_numbers():
+    stats: dict[str, int] = {}
+    rows = _normalize_noaa_payload(
+        [
+            {
+                "station_id": "GHCND:ZZ000000001",
+                "name": "",
+            },
+            {
+                "id": "GHCND:ZZ000000002",
+                "name": "UNKNOWN",
+                "country": "",
+                "latitude": "bad",
+                "longitude": 10,
+                "elevation": "bad",
+                "datacoverage": "bad",
+            },
+        ],
+        stats=stats,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["city"] == "UNKNOWN"
+    assert rows[0]["country"] == "Unknown"
+    assert stats["invalid_missing_id_or_name"] == 1
 
 
 def test_extract_city_uses_location_and_coordinates_fallbacks():

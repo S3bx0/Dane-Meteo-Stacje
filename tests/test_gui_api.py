@@ -135,6 +135,32 @@ def test_get_routes(gui_server, monkeypatch):
             csp_directives[tokens[0]] = set(tokens[1:])
     assert "https://tile.openstreetmap.org" in csp_directives["img-src"]
 
+
+@pytest.mark.parametrize("use_private", [True, False])
+def test_home_reports_configured_token_source(gui_server, monkeypatch, tmp_path, use_private):
+    private_file = tmp_path / "private.env"
+    selected_file = private_file if use_private else tmp_path / "legacy.env"
+    monkeypatch.setattr(gui.TokenProvider, "configured_tokens", classmethod(lambda cls: ["token"]))
+    monkeypatch.setattr(gui, "private_env_file_path", lambda: private_file)
+    monkeypatch.setattr(gui, "resolve_env_file", lambda: selected_file)
+
+    status, _, body = _request(gui_server, "GET", "/")
+
+    assert status == 200
+    expected = b"configured in the private per-user .env file" if use_private else b"legacy project .env"
+    assert expected in body
+
+
+def test_missing_static_asset_returns_safe_404(gui_server, monkeypatch, tmp_path):
+    assets = dict(gui._STATIC_ASSETS)
+    assets["/static/missing.js"] = (tmp_path / "missing.js", "text/javascript; charset=utf-8")
+    monkeypatch.setattr(gui, "_STATIC_ASSETS", assets)
+
+    status, _, body = _request(gui_server, "GET", "/static/missing.js")
+
+    assert status == 404
+    assert json.loads(body)["code"] == "STATIC_ASSET_UNAVAILABLE"
+
     status, static_headers, static_body = _request(gui_server, "GET", "/static/vendor/leaflet/leaflet.js")
     assert status == 200
     assert static_headers["content-type"] == "text/javascript; charset=utf-8"
@@ -453,6 +479,28 @@ def test_search_maps_noaa_deadline_to_504_and_passes_budget(gui_server, monkeypa
     assert "deadline" not in payload["message"]
 
 
+def test_search_filters_station_id_sorts_name_and_records_fallback(gui_server, monkeypatch):
+    rows = [
+        {"station_id": "PL000000002", "city": "Beta", "name": "Zulu", "country": "Poland"},
+        {"station_id": "PL000000001", "city": "Alpha", "name": "Alpha", "country": "Poland"},
+    ]
+    monkeypatch.setattr(
+        gui,
+        "fetch_stations_with_cache_details",
+        lambda **kwargs: FetchResult(stations=rows, source="cache-stale", metadata={}),
+    )
+
+    status, _, body = _request(
+        gui_server,
+        "POST",
+        "/api/search",
+        {"station_id": "PL000000001", "sort_by": "name"},
+    )
+
+    assert status == 200
+    assert [row["station_id"] for row in json.loads(body)["results"]] == ["PL000000001"]
+
+
 def test_country_boundary_endpoint_fetches_geojson_and_reuses_cache(
     gui_server,
     monkeypatch,
@@ -522,6 +570,145 @@ def test_country_boundary_endpoint_validates_country(gui_server):
     assert json.loads(body)["code"] == "BAD_REQUEST"
 
 
+def test_country_boundary_cache_rejects_stale_and_invalid_payloads(monkeypatch, tmp_path):
+    monkeypatch.setattr(gui, "GUI_CACHE_DIR", tmp_path)
+    cache_path = gui._country_boundary_cache_path("Poland")
+    cache_path.parent.mkdir(parents=True)
+    feature = {
+        "type": "Feature",
+        "properties": {"country": "Poland"},
+        "geometry": {"type": "Polygon", "coordinates": []},
+    }
+    cache_path.write_text(json.dumps(feature), encoding="utf-8")
+    stale_now = cache_path.stat().st_mtime + gui.COUNTRY_BOUNDARY_CACHE_TTL_SECONDS + 1
+    monkeypatch.setattr(gui.time, "time", lambda: stale_now)
+
+    assert gui._read_country_boundary_cache("Poland") is None
+    assert gui._read_country_boundary_cache("Poland", allow_stale=True) == feature
+
+    cache_path.write_text(json.dumps([]), encoding="utf-8")
+    assert gui._read_country_boundary_cache("Poland", allow_stale=True) is None
+    cache_path.write_text(
+        json.dumps({**feature, "geometry": {"type": "Point", "coordinates": []}}),
+        encoding="utf-8",
+    )
+    assert gui._read_country_boundary_cache("Poland", allow_stale=True) is None
+    cache_path.write_text("{", encoding="utf-8")
+    assert gui._read_country_boundary_cache("Poland", allow_stale=True) is None
+
+
+def test_country_boundary_rechecks_cache_inside_lock(monkeypatch):
+    feature = {
+        "type": "Feature",
+        "properties": {"country": "Poland"},
+        "geometry": {"type": "Polygon", "coordinates": []},
+    }
+    cached_values = iter([None, feature])
+    monkeypatch.setattr(gui, "_read_country_boundary_cache", lambda *args, **kwargs: next(cached_values))
+
+    assert gui.fetch_country_boundary("Poland") == (feature, "cache")
+
+
+@pytest.mark.parametrize(
+    ("headers", "content", "payload", "message"),
+    [
+        (
+            {"Content-Length": str(gui.COUNTRY_BOUNDARY_MAX_BYTES + 1)},
+            b"{}",
+            [{"geojson": {"type": "Polygon", "coordinates": []}}],
+            "too large",
+        ),
+        ({"Content-Length": "2"}, b"[]", [], "not found"),
+        (
+            {"Content-Length": "64"},
+            b"{}",
+            [{"geojson": {"type": "Point", "coordinates": []}}],
+            "geometry",
+        ),
+    ],
+)
+def test_country_boundary_rejects_invalid_remote_payloads(
+    monkeypatch,
+    tmp_path,
+    headers,
+    content,
+    payload,
+    message,
+):
+    class FakeResponse:
+        def __init__(self):
+            self.headers = headers
+            self.content = content
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        def json(self):
+            return payload
+
+    monkeypatch.setattr(gui, "GUI_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gui, "_LAST_BOUNDARY_FETCH_AT", 0.0)
+    monkeypatch.setattr(gui.requests, "get", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(gui.CountryBoundaryError, match=message):
+        gui.fetch_country_boundary("Poland")
+
+
+def test_country_boundary_uses_stale_cache_on_network_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(gui, "GUI_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gui, "_LAST_BOUNDARY_FETCH_AT", 0.0)
+    feature = {
+        "type": "Feature",
+        "properties": {"country": "Poland"},
+        "geometry": {"type": "Polygon", "coordinates": []},
+    }
+    gui._write_country_boundary_cache("Poland", feature)
+    cache_path = gui._country_boundary_cache_path("Poland")
+    stale_now = cache_path.stat().st_mtime + gui.COUNTRY_BOUNDARY_CACHE_TTL_SECONDS + 1
+    monkeypatch.setattr(gui.time, "time", lambda: stale_now)
+    monkeypatch.setattr(
+        gui.requests,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(gui.requests.RequestException("offline")),
+    )
+
+    assert gui.fetch_country_boundary("Poland") == (feature, "cache-stale")
+
+
+def test_country_boundary_maps_network_error_without_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(gui, "GUI_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(gui, "_LAST_BOUNDARY_FETCH_AT", 0.0)
+    monkeypatch.setattr(
+        gui.requests,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(gui.requests.RequestException("offline")),
+    )
+
+    with pytest.raises(gui.CountryBoundaryError, match="service is unavailable"):
+        gui.fetch_country_boundary("Poland")
+
+
+def test_country_boundary_endpoint_requires_country_and_maps_service_error(gui_server, monkeypatch):
+    status, _, body = _request(gui_server, "POST", "/api/country-boundary", {})
+    assert status == 400
+    assert json.loads(body)["code"] == "BAD_REQUEST"
+
+    monkeypatch.setattr(
+        gui,
+        "fetch_country_boundary",
+        lambda country: (_ for _ in ()).throw(gui.CountryBoundaryError("offline")),
+    )
+    status, _, body = _request(
+        gui_server,
+        "POST",
+        "/api/country-boundary",
+        {"country": "Poland"},
+    )
+    assert status == 502
+    assert json.loads(body)["code"] == "COUNTRY_BOUNDARY_UNAVAILABLE"
+
+
 def test_temperature_endpoint_returns_heatmap_payload(gui_server, monkeypatch):
     heatmap_payload = {
         "station_id": "PLM00012295",
@@ -585,6 +772,62 @@ def test_temperature_capabilities_endpoint_returns_station_datatypes(gui_server,
 
     assert status == 200
     assert response["data"] == capabilities
+
+
+def test_temperature_capabilities_endpoint_requires_station_id(gui_server):
+    status, _, body = _request(gui_server, "POST", "/api/temperature-capabilities", {})
+
+    assert status == 400
+    assert json.loads(body)["code"] == "BAD_REQUEST"
+
+
+def test_temperature_capabilities_endpoint_reports_busy_server(gui_server, monkeypatch):
+    exhausted = threading.BoundedSemaphore(gui.MAX_CONCURRENT_FETCHES)
+    for _ in range(gui.MAX_CONCURRENT_FETCHES):
+        assert exhausted.acquire(blocking=False)
+    monkeypatch.setattr(gui, "_FETCH_LIMITER", exhausted)
+
+    status, _, body = _request(
+        gui_server,
+        "POST",
+        "/api/temperature-capabilities",
+        {"station_id": "GHCND:PLM00012295"},
+    )
+
+    assert status == 503
+    assert json.loads(body)["code"] == "SERVER_BUSY"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_code"),
+    [
+        (ValueError("bad station"), 400, "BAD_REQUEST"),
+        (NoaaTimeoutError("deadline"), 504, "NOAA_TIMEOUT"),
+        (NoaaNetworkError("offline"), 502, "NOAA_NETWORK"),
+    ],
+)
+def test_temperature_capabilities_endpoint_maps_failures(
+    gui_server,
+    monkeypatch,
+    error,
+    expected_status,
+    expected_code,
+):
+    monkeypatch.setattr(
+        gui,
+        "fetch_station_temperature_capabilities",
+        lambda station_id: (_ for _ in ()).throw(error),
+    )
+
+    status, _, body = _request(
+        gui_server,
+        "POST",
+        "/api/temperature-capabilities",
+        {"station_id": "GHCND:PLM00012295"},
+    )
+
+    assert status == expected_status
+    assert json.loads(body)["code"] == expected_code
 
 
 def test_temperature_endpoint_dispatches_daily_export_mode(gui_server, monkeypatch):
@@ -722,6 +965,43 @@ def test_search_rejects_country_missing_from_noaa_catalogue(gui_server):
 
     assert status == 400
     assert json.loads(body)["code"] == "BAD_REQUEST"
+
+
+def test_run_server_opens_browser_and_closes_after_interrupt(monkeypatch):
+    events = []
+
+    class FakeServer:
+        def __init__(self, address, handler):
+            events.append(("init", address, handler))
+
+        def serve_forever(self):
+            events.append(("serve",))
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            events.append(("close",))
+
+    monkeypatch.setattr(gui, "AppHTTPServer", FakeServer)
+    monkeypatch.setattr(gui.webbrowser, "open", lambda url: events.append(("open", url)))
+
+    gui.run_server("127.0.0.1", 8765, open_browser=True)
+
+    assert events[0][0:2] == ("init", ("127.0.0.1", 8765))
+    assert ("open", "http://127.0.0.1:8765") in events
+    assert events[-2:] == [("serve",), ("close",)]
+
+
+def test_main_requires_explicit_network_binding_and_allows_opt_in(monkeypatch):
+    with pytest.raises(SystemExit):
+        gui.main(["--host", "not-an-ip", "--no-browser"])
+    with pytest.raises(SystemExit):
+        gui.main(["--host", "0.0.0.0", "--no-browser"])
+
+    calls = []
+    monkeypatch.setattr(gui, "run_server", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    assert gui.main(["--host", "0.0.0.0", "--allow-network", "--no-browser"]) == 0
+    assert calls == [(('0.0.0.0', 8765), {"open_browser": False})]
 
 
 def test_unexpected_error_returns_safe_correlated_500_and_logs_traceback(gui_server, monkeypatch):
