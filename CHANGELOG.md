@@ -5,6 +5,8 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-17
+
 ### Added
 
 - Interaktywna mapa Leaflet z podkładem OpenStreetMap, grupowaniem znaczników, wyborem
@@ -49,6 +51,11 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
 
 - Domyślny plik tokenów przeniesiono do `%LOCALAPPDATA%\\Dane-Meteo-Stacje\\.env`.
 - Lokalne API wymaga JSON, sprawdza `Origin` i domyślnie nie pozwala wystawić GUI poza loopback.
+- GUI korzysta wyłącznie z zarządzanych zapytań NOAA i prywatnego cache; dowolne zdalne URL-e
+  oraz ścieżki plików pozostają dostępne tylko dla lokalnego CLI.
+- Żądania zdalne wymagają HTTPS, dokładnej domeny NOAA NCEI, publicznego adresu DNS i ponownej
+  walidacji każdego przekierowania.
+- Ścieżki cache kraju i temperatur są normalizowane i ograniczone do zarządzanych katalogów.
 
 ## [0.1.1] - 2026-08-10
 
@@ -96,6 +103,7 @@ Format jest oparty na Keep a Changelog, a wersje stosuja Semantic Versioning.
 - Renderowanie danych tabeli przez `textContent` zamiast `innerHTML`.
 - Tokeny NOAA i szczegoly wyjatkow nie sa zwracane klientowi ani logowane.
 
-[Unreleased]: https://github.com/S3bx0/Dane-Meteo-Stacje/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/S3bx0/Dane-Meteo-Stacje/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/S3bx0/Dane-Meteo-Stacje/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/S3bx0/Dane-Meteo-Stacje/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/S3bx0/Dane-Meteo-Stacje/releases/tag/v0.1.0
