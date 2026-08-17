@@ -5,7 +5,7 @@ Audytowana kopia: `X:\Projekty\Projekty instalacji\_Obliczenia\Obliczenia\Dane-M
 Gałąź: `main`
 Ostatni commit bazowy: `117070d316e3a1ef45a62efc3ea26a4c3ac1aa03` (`0.1.1`)
 
-## Status po wdrożeniu poprawek — 2026-08-12
+## Status po wdrożeniu poprawek — 2026-08-17
 
 Najważniejsze zalecenia audytu zostały wdrożone i zweryfikowane lokalnie:
 
@@ -23,19 +23,17 @@ Najważniejsze zalecenia audytu zostały wdrożone i zweryfikowane lokalnie:
 | Test E2E | poprawiona etykieta i dodany scenariusz kraj → wybór stacji → JSON Heatmapy |
 | Higiena | logi `*.log` są ignorowane; User-Agent korzysta z wersji pakietu |
 
-Końcowa walidacja: **168 testów zaliczonych, 1 E2E pominięty lokalnie, coverage 93,47%**.
-Ruff, mypy i Bandit zakończyły się bez zgłoszeń. Test Playwright pozostaje wykonywany przez
-osobne zadanie CI (lokalnie Chromium nie został doinstalowany).
+Końcowa walidacja przed wydaniem 0.2.0: **205 testów zaliczonych, coverage 93,17%**.
+Ruff, mypy, Bandit, pip-audit, test Playwright E2E oraz CodeQL zakończyły się bez zgłoszeń
+w GitHub Actions na `main`.
 
-Istniejący projektowy `.env` został przeniesiony bez odczytywania treści do prywatnej
-lokalizacji i otrzymał ACL tylko dla bieżącego użytkownika oraz `SYSTEM`. Końcowy test live
-zwrócił jednak `503 not_ready`: plik nie zawiera rozpoznanej niepustej wartości tokenu.
-Do testu NOAA trzeba lokalnie uzupełnić `NOAA_API_TOKENS=...`; sekret GitHub Actions nie jest
-dostępny dla procesu uruchomionego na `127.0.0.1`.
+Tokeny lokalne są skonfigurowane, a aplikacja potwierdziła działanie zapytań NOAA. Zalecana
+pozostaje prywatna lokalizacja `%LOCALAPPDATA%\\Dane-Meteo-Stacje\\.env`; projektowy `.env`
+jest obsługiwany wyłącznie dla zgodności wstecznej i pozostaje ignorowany przez Git.
 
-Pozostałe usprawnienia nieblokujące stabilnego użycia: praca temperatur w tle z postępem i
-anulowaniem, bezpośredni zapis do katalogu Heatmapy, automatyczna retencja cache/logów oraz
-aktualizacja narzędzia `pip`. Zmiany nie zostały automatycznie commitowane ani wysłane do GitHub.
+Zmiany funkcjonalne i bezpieczeństwa zostały scalone do `main` w PR #8. Pozostałe usprawnienia
+nieblokujące stabilnego użycia: praca temperatur w tle z postępem i anulowaniem, bezpośredni
+zapis do katalogu Heatmapy oraz automatyczna retencja cache/logów.
 
 ## Podsumowanie pierwotnego audytu
 
